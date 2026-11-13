@@ -7,8 +7,13 @@
 //! A kind is logical. It says `Int`, not how many bits an Int has, and it says
 //! nothing about where a value is stored. Those are choices a port states.
 //!
-//! Gap: Sum fibers, Structs, Tuples, Lists, Maps and Strings are kinds of the
-//! language that are not written here yet.
+//! Every fiber of the language is named here, so each has one definition.
+//! Naming a fiber does not oblige any component to support it. Where stating
+//! how a fiber is stored would be costly, this module declines to: it answers
+//! "not described" and a component is free to report the fiber as unsupported.
+//!
+//! Gap: Structs, Tuples, Lists, Maps and Strings are kinds of the language
+//! that are not written here yet.
 
 /// One scalar of a value, before any choice of width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,63 +26,143 @@ pub enum Primitive {
 /// What one site of an Array holds: plain data of fixed width, with no
 /// references and no size that is only known at run time.
 ///
-/// Two fibers are the same exactly when they are equal here. A product is
-/// identified by its component names, their order and their fibers. The name
-/// a product or any other fiber was declared under is not part of it.
+/// Two fibers are the same exactly when they are equal here. A product or a
+/// sum is identified by its names, their order and their fibers. The name a
+/// fiber was declared under is not part of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fiber {
     Bool,
     Int,
     Real,
+    /// An exact fraction: a numerator and a positive denominator.
+    Rational,
+    /// A complex number: `re` and `im`.
+    Complex,
+    /// A color: `r`, `g`, `b` and `a`.
+    Color,
     /// A stated number of components of one fiber, at least one.
     Vector {
         element: Box<Fiber>,
         count: u32,
     },
-    /// Named components in order. A component may be any fiber, including a
-    /// vector or another product.
+    /// A rotation of the plane.
+    SO2,
+    /// A rotation of space.
+    SO3,
+    /// A matrix with a stated number of rows and columns.
+    Mat {
+        rows: u32,
+        columns: u32,
+    },
+    /// An antisymmetric form of a stated degree on a stated dimension.
+    Form {
+        degree: u32,
+        dimension: u32,
+    },
+    /// A symmetric metric on a stated dimension.
+    Metric {
+        dimension: u32,
+    },
+    /// A static list of a stated number of positions, all of one fiber.
+    Repeat {
+        element: Box<Fiber>,
+        count: u32,
+    },
+    /// A static list whose positions each state their own fiber.
+    Positions(Vec<Fiber>),
+    /// Named components in order. A component may be any fiber.
     Product(Vec<(String, Fiber)>),
+    /// Exactly one of an ordered roster of named variants, each with a
+    /// payload fiber or none.
+    Sum(Vec<(String, Option<Fiber>)>),
 }
 
 impl Fiber {
-    /// How many scalars one value of this fiber has, or nothing if the count
-    /// does not fit in 64 bits.
+    /// How many scalars one value of this fiber has. The answer is nothing
+    /// if this module does not describe how the fiber is stored, or if the
+    /// count does not fit in 64 bits.
     pub fn leaf_count(&self) -> Option<u64> {
+        fn all<'a>(fibers: impl Iterator<Item = &'a Fiber>) -> Option<u64> {
+            let mut sum = 0u64;
+            for fiber in fibers {
+                sum = sum.checked_add(fiber.leaf_count()?)?;
+            }
+            Some(sum)
+        }
         match self {
             Fiber::Bool | Fiber::Int | Fiber::Real => Some(1),
-            Fiber::Vector { element, count } => {
+            Fiber::Rational | Fiber::Complex => Some(2),
+            Fiber::Color => Some(4),
+            Fiber::Vector { element, count } | Fiber::Repeat { element, count } => {
                 element.leaf_count()?.checked_mul(u64::from(*count))
             }
-            Fiber::Product(components) => components
-                .iter()
-                .try_fold(0u64, |sum, (_, fiber)| sum.checked_add(fiber.leaf_count()?)),
+            Fiber::Positions(positions) => all(positions.iter()),
+            Fiber::Product(components) => all(components.iter().map(|(_, fiber)| fiber)),
+            Fiber::Sum(variants) => {
+                all(variants.iter().filter_map(|(_, payload)| payload.as_ref()))?.checked_add(1)
+            }
+            Fiber::SO2
+            | Fiber::SO3
+            | Fiber::Mat { .. }
+            | Fiber::Form { .. }
+            | Fiber::Metric { .. } => None,
         }
     }
 
-    /// The scalars of one value, in order: a vector's elements first to last,
-    /// a product's components as declared.
-    pub fn leaves(&self) -> Vec<Primitive> {
+    /// The scalars of one value, in order, or nothing if this module does not
+    /// describe how the fiber is stored.
+    ///
+    /// A vector or static list gives its positions first to last. A product
+    /// gives its components as declared. A sum gives an Int tag holding the
+    /// active variant's position, then the scalars of every variant's payload
+    /// in declared order.
+    ///
+    /// Gap: the storage of `SO2`, `SO3`, `Mat`, `Form` and `Metric` is not
+    /// described. A port of such a fiber is refused as unsupported.
+    pub fn leaves(&self) -> Option<Vec<Primitive>> {
         let mut leaves = Vec::new();
-        self.push_leaves(&mut leaves);
-        leaves
+        self.push_leaves(&mut leaves)?;
+        Some(leaves)
     }
 
-    fn push_leaves(&self, leaves: &mut Vec<Primitive>) {
+    fn push_leaves(&self, leaves: &mut Vec<Primitive>) -> Option<()> {
         match self {
             Fiber::Bool => leaves.push(Primitive::Bool),
             Fiber::Int => leaves.push(Primitive::Int),
             Fiber::Real => leaves.push(Primitive::Real),
-            Fiber::Vector { element, count } => {
+            Fiber::Rational => leaves.extend([Primitive::Int; 2]),
+            Fiber::Complex => leaves.extend([Primitive::Real; 2]),
+            Fiber::Color => leaves.extend([Primitive::Real; 4]),
+            Fiber::Vector { element, count } | Fiber::Repeat { element, count } => {
                 for _ in 0..*count {
-                    element.push_leaves(leaves);
+                    element.push_leaves(leaves)?;
+                }
+            }
+            Fiber::Positions(positions) => {
+                for fiber in positions {
+                    fiber.push_leaves(leaves)?;
                 }
             }
             Fiber::Product(components) => {
                 for (_, fiber) in components {
-                    fiber.push_leaves(leaves);
+                    fiber.push_leaves(leaves)?;
                 }
             }
+            Fiber::Sum(variants) => {
+                leaves.push(Primitive::Int);
+                for (_, payload) in variants {
+                    if let Some(fiber) = payload {
+                        fiber.push_leaves(leaves)?;
+                    }
+                }
+            }
+            Fiber::SO2
+            | Fiber::SO3
+            | Fiber::Mat { .. }
+            | Fiber::Form { .. }
+            | Fiber::Metric { .. } => return None,
         }
+        Some(())
     }
 }
 
@@ -135,7 +220,8 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// How many scalars one element of this kind has.
+    /// How many scalars one element of this kind has, or nothing if its
+    /// fiber's storage is not described.
     pub fn leaf_count(&self) -> Option<u64> {
         match self {
             Kind::Fiber(fiber) | Kind::Array { element: fiber, .. } => fiber.leaf_count(),
@@ -143,9 +229,10 @@ impl Kind {
         }
     }
 
-    /// The scalars of one element of this kind, in order. A port lists one
-    /// leaf for each, in this order.
-    pub fn leaves(&self) -> Vec<Primitive> {
+    /// The scalars of one element of this kind, in order, or nothing if its
+    /// fiber's storage is not described. A port lists one leaf for each, in
+    /// this order.
+    pub fn leaves(&self) -> Option<Vec<Primitive>> {
         match self {
             Kind::Fiber(fiber) | Kind::Array { element: fiber, .. } => fiber.leaves(),
             Kind::Optional(inner) => inner.leaves(),
@@ -181,7 +268,7 @@ mod tests {
             axes: vec![axis],
         };
         let state = Kind::Optional(Box::new(field(AxisKind::Closed)));
-        assert_eq!(state.leaves(), vec![Primitive::Real; 3]);
+        assert_eq!(state.leaves(), Some(vec![Primitive::Real; 3]));
         assert_eq!(state.dimensions(), vec![Dimension::Domain { rank: 1 }]);
         // The form of an axis is part of the kind.
         assert_ne!(field(AxisKind::Closed), field(AxisKind::Periodic));
@@ -222,7 +309,44 @@ mod tests {
             Primitive::Real,
             Primitive::Int,
         ];
-        assert_eq!(particle.leaves(), expected);
+        assert_eq!(particle.leaves(), Some(expected.to_vec()));
         assert_eq!(particle.leaf_count(), Some(5));
+    }
+
+    #[test]
+    fn a_sum_stores_a_tag_then_every_payload() {
+        let shape = Fiber::Sum(vec![
+            ("Point".to_string(), None),
+            ("Segment".to_string(), Some(Fiber::Real)),
+            ("Phase".to_string(), Some(Fiber::Complex)),
+        ]);
+        let expected = [
+            Primitive::Int,
+            Primitive::Real,
+            Primitive::Real,
+            Primitive::Real,
+        ];
+        assert_eq!(shape.leaves(), Some(expected.to_vec()));
+    }
+
+    #[test]
+    fn a_fiber_whose_storage_is_not_described_answers_nothing() {
+        assert_eq!(Fiber::SO3.leaves(), None);
+        // The answer carries through anything built from it.
+        let pose = Fiber::Product(vec![
+            (
+                "at".to_string(),
+                Fiber::Vector {
+                    element: Box::new(Fiber::Real),
+                    count: 3,
+                },
+            ),
+            ("facing".to_string(), Fiber::SO3),
+        ]);
+        assert_eq!(pose.leaves(), None);
+        assert_eq!(pose.leaf_count(), None);
+        // It is still a kind with an identity.
+        assert_eq!(pose, pose.clone());
+        assert_ne!(Fiber::SO3, Fiber::SO2);
     }
 }

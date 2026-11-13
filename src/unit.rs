@@ -284,6 +284,9 @@ pub enum Defect {
     /// either, a size of the wrong sort, or a scalar that cannot store its
     /// primitive.
     KindMismatch(Name),
+    /// A port's kind includes a fiber whose storage this contract does not
+    /// describe yet. The kind is valid; a unit cannot carry it across.
+    KindUnsupported(Name),
     /// A leaf names a plane its port does not have.
     UnknownPlane {
         leaf: u32,
@@ -302,8 +305,8 @@ pub enum Defect {
 /// A unit description that passed [`Unit::check`].
 ///
 /// The field is private, so holding one is proof the description passed these
-/// checks: every slot and dimension it names exists; each port's sizes and
-/// leaves match its kind; no stage writes an input
+/// checks: every slot and dimension it names exists; each port's kind is one
+/// whose storage is described, and its sizes and leaves match it; no stage writes an input
 /// or an alias; an alias refers to an input; the capacity of storage is known
 /// before the stage that writes it; every leaf fits inside one element of its plane and
 /// overlaps no other. It does not check that every result is written by some
@@ -350,12 +353,16 @@ impl Unit {
         // A port's sizes and leaves are the ones its kind calls for.
         for port in self.inputs.iter().chain(&self.outputs) {
             let mismatch = Defect::KindMismatch(port.name);
+            let Some(count) = port.kind.leaf_count() else {
+                return Err(Defect::KindUnsupported(port.name));
+            };
             let dimensions = port.kind.dimensions();
-            if dimensions.len() != port.shape.len()
-                || port.kind.leaf_count() != Some(port.leaves.len() as u64)
-            {
+            if dimensions.len() != port.shape.len() || count != port.leaves.len() as u64 {
                 return Err(mismatch);
             }
+            let Some(primitives) = port.kind.leaves() else {
+                return Err(Defect::KindUnsupported(port.name));
+            };
             for (dimension, sizing) in dimensions.iter().zip(&port.shape) {
                 let fits = match sizing {
                     Sizing::Fixed(size) => size.is(*dimension),
@@ -365,7 +372,7 @@ impl Unit {
                     return Err(mismatch);
                 }
             }
-            for (primitive, leaf) in port.kind.leaves().iter().zip(&port.leaves) {
+            for (primitive, leaf) in primitives.iter().zip(&port.leaves) {
                 if !leaf.scalar.stores(*primitive) {
                     return Err(mismatch);
                 }
@@ -625,5 +632,28 @@ mod tests {
         assert_eq!(unit(wrong, vec![out(16)]).check().err(), mismatch);
         let short = vec![leaf(Scalar::F64, 0, 0)];
         assert_eq!(unit(short, vec![out(16)]).check().err(), mismatch);
+    }
+
+    #[test]
+    fn a_fiber_whose_storage_is_not_described_is_refused_as_unsupported() {
+        let unit = Unit {
+            outputs: vec![Port {
+                name: STATE,
+                kind: Kind::Array {
+                    element: Fiber::Mat {
+                        rows: 3,
+                        columns: 3,
+                    },
+                    axes: vec![AxisKind::Closed],
+                },
+                shape: vec![cells(4)],
+                leaves: Vec::new(),
+                planes: vec![Slot(0)],
+            }],
+            storage: vec![Storage::Output(need(72, vec![cells(4)]))],
+            stages: vec![stage(&[0], &[])],
+            ..Unit::default()
+        };
+        assert_eq!(unit.check().err(), Some(Defect::KindUnsupported(STATE)));
     }
 }
