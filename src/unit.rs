@@ -23,9 +23,12 @@ pub struct Axis {
 /// how many bytes each element takes. What compile time cannot fix is how many
 /// elements there are. Those counts are the dimensions.
 ///
-/// Decide: an Array axis also carries its topology, and an Optional value
-/// carries its presence. Both are known only at run time. Whether they are
-/// dimensions in the shape record or travel some other way is not settled.
+/// The topology of an Array axis and the presence of an Optional value are
+/// also known only at run time, but they are not dimensions. They are
+/// metadata of a value. Neither counts elements, and an absent value is not an
+/// empty one.
+///
+/// Gap: how a port and a value carry topology and presence is not written yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dimension {
     /// The number of elements in a List.
@@ -222,8 +225,11 @@ pub struct Stage {
 ///
 /// There is one kind of unit. A scalar result, an Array fill, a multi-stage
 /// update and a fused kernel differ only in how many ports, slots and stages
-/// they list. A unit that writes State for an update block and a unit that
-/// materializes a binding on demand differ only in the names of their outputs.
+/// they list. A unit asked for by an update and a unit asked for by an
+/// observation are also the same kind of unit: a computation that reads named
+/// values and produces named values. Whether its results become the next State
+/// is decided by the request, not by anything in the unit. Producing the value
+/// of a State is not the same as writing it.
 #[derive(Clone, Debug, Default)]
 pub struct Unit {
     pub inputs: Vec<Port>,
@@ -277,8 +283,6 @@ pub enum Defect {
         stage: u32,
         slot: Slot,
     },
-    /// A unit that produces a State must produce only States.
-    MixedOutputs,
     /// A leaf names a plane its port does not have.
     UnknownPlane {
         leaf: u32,
@@ -436,14 +440,6 @@ impl Unit {
                     return Err(Defect::OutputPlaneNotResult(*slot));
                 }
             }
-        }
-        let states = self
-            .outputs
-            .iter()
-            .filter(|port| matches!(port.name, Name::State(_)))
-            .count();
-        if states != 0 && states != self.outputs.len() {
-            return Err(Defect::MixedOutputs);
         }
         Ok(Checked(self))
     }

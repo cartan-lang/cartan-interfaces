@@ -5,22 +5,24 @@ use crate::unit::{Checked, Code, Target};
 
 /// What the runtime asks a supplier to compile.
 ///
-/// All three are the same kind of computation: read named values, produce
-/// named values. They differ only in which values are produced.
+/// All three ask for the same kind of computation: read named values, produce
+/// named values. The request, not the unit, says what happens to the results.
 #[derive(Clone, Copy, Debug)]
 pub enum Request<'a> {
     /// The initial value of every State. Initial values are closed: they read
     /// no State and no Param. A State that starts absent and is later given a
     /// field computed from Params gets that field from an ordinary binding,
-    /// not from its initial value.
+    /// not from its initial value. The results are committed as the first
+    /// State.
     Launch,
     /// One execution of one update block. Reads the committed State, Params
     /// and upstream bindings, and produces the next value of each State the
-    /// block writes.
+    /// block writes. The results are committed together as the next State.
     Update(UpdateId),
-    /// The values of the named bindings for one committed State. Reads the
-    /// same things an update may. Produces no State. The names need not have
-    /// been selected at launch.
+    /// The values of the named declarations for one committed State. Reads
+    /// the same things an update may. A name may be a binding, a Param or a
+    /// State; asking for a State's value reads it. Nothing is committed. The
+    /// names need not have been selected at launch.
     Observe(&'a [Name]),
 }
 
