@@ -20,6 +20,15 @@ standalone clone, the essentials are:
 
 ## Scope
 
+- The contracts are aspirational and deliberately idealistic. They state what
+  should cross each boundary, designed from requirements. Component source is
+  brought into compliance with them; they are never bent to fit existing code.
+- Build them out gradually, one owner ruling at a time. An under-specified
+  contract is acceptable. A `Gap:` is intentional, not a task. Existing code
+  and older ABI or implementation records are not authority for a contract.
+- A request to revise a contract arrives as an escalation from a builder who
+  cannot meet a requirement within it. Take it to the workspace owner with the
+  requirement, what the contract cannot express and the smallest change.
 - Own the contracts between Cartan components: plain types and trait
   signatures, one module per component's side. The only logic is checking that
   a description is well formed. The crate has no dependencies.
