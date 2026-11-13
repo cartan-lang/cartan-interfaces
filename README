@@ -1,0 +1,4 @@
+cartan-interfaces is the draft set of contracts between Cartan components,
+written as Rust types and trait signatures with one module per component's side
+and no dependencies. Its runtime-facing modules stand alone, so a compiler built
+from other components can supply code to the same runtime.

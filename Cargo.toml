@@ -1,0 +1,12 @@
+[package]
+name = "cartan-interfaces"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Draft contract between a Cartan code generator and the Cartan runtime"
+
+[features]
+default = ["pipeline"]
+# The contracts between the components of the official compiler. A compiler
+# built from other components needs none of them.
+pipeline = []
