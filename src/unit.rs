@@ -150,8 +150,7 @@ pub struct Need {
     pub align: u32,
     /// How many elements the slot must be able to hold: the product of these.
     /// Empty means one element. Every size here is known before the stage
-    /// that first writes the slot. The value written may be smaller than the
-    /// capacity; its actual sizes are the ones in its port.
+    /// that first writes the slot.
     pub capacity: Vec<Sizing>,
 }
 
@@ -202,11 +201,11 @@ pub struct Port {
 /// returns. All providing of storage, and any waiting for it, happens in the
 /// runtime between stages.
 ///
-/// A result whose size depends on data the unit computes is handled in one of
-/// two ways. A stage can be given storage with capacity for a bound known
-/// beforehand and report the actual size it produced. Or one stage can
-/// measure and a later stage fill, with the runtime providing storage between
-/// them.
+/// No value is sized from its own contents. The size of a result may depend
+/// on data, but only on data computed before the result is filled. One stage
+/// determines the size, the runtime provides storage to fit, and a later
+/// stage fills it. A stage therefore never determines the size or presence
+/// of a value it is writing.
 ///
 /// A stage has no failure to report. Cartan is total, so compiled code always
 /// runs to completion and every outcome it computes is an ordinary value. A
@@ -272,9 +271,10 @@ pub enum Code {
 pub enum Defect {
     UnknownSlot(Slot),
     UnknownDimension(Dim),
-    /// A stage writes storage whose capacity is settled by no input and no
-    /// earlier stage. Storage is provided before a stage runs, so a stage
-    /// cannot settle the capacity of what it writes.
+    /// A stage writes storage whose capacity, or a result whose size or
+    /// presence, is settled by no input and no earlier stage. Storage is
+    /// provided before a stage runs, and no value is sized from its own
+    /// contents, so a stage cannot settle either for what it writes.
     SizeNotYetKnown {
         stage: u32,
         dim: Dim,
@@ -324,8 +324,8 @@ pub enum Defect {
 /// checks: every slot and dimension it names exists; each port's kind is one
 /// whose storage is described and which nests no Optional, and its sizes,
 /// presence and leaves match it; no capacity is stated as presence; no stage writes an input
-/// or an alias; an alias refers to an input; the capacity of storage is known
-/// before the stage that writes it; every leaf fits inside one element of its plane and
+/// or an alias; an alias refers to an input; the capacity of storage, and the
+/// sizes and presence of a result, are known before the stage that writes it; every leaf fits inside one element of its plane and
 /// overlaps no other. It does not check that every result is written by some
 /// stage, and it cannot show that the code honors the description.
 ///
@@ -461,6 +461,7 @@ impl Unit {
             }
         }
         let mut provided = vec![false; self.storage.len()];
+        let result_of = |slot: Slot| self.outputs.iter().find(|port| port.planes.contains(&slot));
         for (index, stage) in self.stages.iter().enumerate() {
             for slot in &stage.reads {
                 storage(*slot)?;
@@ -473,7 +474,8 @@ impl Unit {
                     });
                 };
                 if !std::mem::replace(&mut provided[slot.0 as usize], true) {
-                    for sizing in &need.capacity {
+                    let of_result = result_of(*slot).map(|port| port.shape.iter());
+                    for sizing in need.capacity.iter().chain(of_result.into_iter().flatten()) {
                         if let Sizing::Runtime(dim) = sizing {
                             if !known[dim.0 as usize] {
                                 return Err(Defect::SizeNotYetKnown {
@@ -602,8 +604,10 @@ mod tests {
         // One stage measures, the next fills.
         let measured = unit(domain(), vec![stage(&[], &[0]), stage(&[0], &[])]);
         assert!(measured.check().is_ok());
-        // One stage fills storage sized for a bound and reports the actual domain.
-        assert!(unit(cells(100), vec![stage(&[0], &[0])]).check().is_ok());
+        // No Array is sized from its own contents: a stage cannot determine
+        // the domain of a result it is filling, whatever storage it was given.
+        let own = unit(cells(100), vec![stage(&[0], &[0])]).check();
+        assert_eq!(own.err(), Some(late));
     }
 
     #[test]
@@ -678,7 +682,7 @@ mod tests {
             }],
             storage: vec![Storage::Output(need(8, vec![capacity]))],
             dimensions: vec![Dimension::Presence, Dimension::Domain { rank: 1 }],
-            stages: vec![stage(&[0], &[0, 1])],
+            stages: vec![stage(&[], &[0, 1]), stage(&[0], &[])],
             ..Unit::default()
         };
         let array = || Kind::Array {
@@ -686,7 +690,7 @@ mod tests {
             axes: vec![AxisKind::Closed],
         };
         let optional = || Kind::Optional(Box::new(array()));
-        assert!(unit(optional(), cells(100)).check().is_ok());
+        assert!(unit(optional(), Sizing::Runtime(Dim(1))).check().is_ok());
 
         // Presence is not a size, so it cannot state how much storage to provide.
         let as_capacity = unit(optional(), Sizing::Fixed(Size::Presence(true))).check();
