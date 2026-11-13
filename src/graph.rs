@@ -101,6 +101,12 @@ pub struct Plan {
 /// result is stored. Whether a finite window of one is a separate finite
 /// result or a partly stored form of the original is not settled.
 ///
+/// Whatever the representation becomes, it states shared structure once. A
+/// value used in several places, a rule read at several offsets and an
+/// expression that appears in both branches of a conditional each appear once
+/// and are referred to. Nothing in it may require expanding a shared thing at
+/// every use, or prevent either side from hoisting it.
+///
 /// Gap: this is a placeholder. The representation Codegen lowers from, and
 /// how a domain and a rule are written in it, are not written yet.
 pub struct Computation {

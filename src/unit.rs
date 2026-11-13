@@ -188,6 +188,11 @@ pub struct Port {
     /// One entry per dimension of the kind, in the kind's order.
     pub shape: Vec<Sizing>,
     /// One entry per scalar of the kind, in the kind's order.
+    ///
+    /// Gap: listing every scalar writes a repeated fiber out in full, so a
+    /// vector of vectors grows with the product of its widths. A form that
+    /// states a repeated layout once is needed before wide or nested vectors
+    /// are carried.
     pub leaves: Vec<Leaf>,
     /// The slots that hold the value. Each is one physical plane.
     pub planes: Vec<Slot>,

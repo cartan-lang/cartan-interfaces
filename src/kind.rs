@@ -12,8 +12,16 @@
 //! how a fiber is stored would be costly, this module declines to: it answers
 //! "not described" and a component is free to report the fiber as unsupported.
 //!
+//! There is no kind for a function. Functions are resolved during analysis
+//! and none is a value that crosses a boundary.
+//!
 //! Gap: Structs, Tuples, Lists, Maps and Strings are kinds of the language
 //! that are not written here yet.
+//!
+//! Gap: a kind is written out in full wherever it is used. That is harmless
+//! for the kinds here but not for Structs nested inside one another with
+//! Array members. Before those are added, a kind used in several places
+//! needs to be stated once and referred to.
 
 /// One scalar of a value, before any choice of width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

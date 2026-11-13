@@ -40,6 +40,11 @@ standalone clone, the essentials are:
   workspace owner for the runtime-facing layer.
 - Keep the crate publishable on its own. State rationale directly. Do not refer
   to mechanisms inside other components, to workspace records or to people.
+- A contract must let shared structure be stated once and referred to. Never
+  add a form that has to write a shared thing out at each use, or that rules
+  out hash-consing or hoisting on either side. Check each addition against
+  nested Structs with Array members and against an expression used in both
+  branches of a conditional.
 - Mark parts not yet written with a doc paragraph starting `Gap:` and open
   choices with `Decide:`, so `grep` lists every open point.
 - Implementations of a component's insides do not belong here. Tests here
