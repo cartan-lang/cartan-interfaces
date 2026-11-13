@@ -53,8 +53,13 @@ pub struct Dim(pub u32);
 /// the unit's dimensions. The runtime fills the entries that describe inputs.
 /// The unit's stages fill the rest. That is how a unit reports the sizes of
 /// what it produced and whether an Optional result is present, and how the
-/// runtime learns either without reading the value's storage. The sizes of an
-/// absent value are left unset.
+/// runtime learns either without reading the value's storage.
+///
+/// An entry that has not been filled is different from one that says a value
+/// is absent. The runtime knows the presence of an input before the unit
+/// runs. It knows the presence of a result only once the stage that
+/// determines it has returned, so storage it provided beforehand may go
+/// unused. The sizes of an absent value are left unfilled.
 ///
 /// In an input port, `Fixed` is a specialization the runtime verifies against
 /// the actual value before running. A change of extent needs no recompilation

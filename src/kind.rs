@@ -193,8 +193,9 @@ pub enum AxisKind {
 /// many elements there are, and whether an Optional value is present.
 ///
 /// Presence shares the record with the sizes but is not a size. It counts
-/// nothing, and an absent value is not an empty one: it has no sizes and no
-/// storage.
+/// nothing, and an absent value is not an empty one. An absent value owns no
+/// storage and its sizes do not apply: they are neither read nor used to
+/// decide how much storage to provide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dimension {
     /// Whether an Optional value is present.
