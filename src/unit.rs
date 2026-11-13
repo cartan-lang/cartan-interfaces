@@ -36,7 +36,7 @@ impl ShapeValue {
         match (self, field) {
             (ShapeValue::Presence(_), ShapeField::Presence) => true,
             (ShapeValue::Length(_), ShapeField::Length) => true,
-            (ShapeValue::Domain(axes), ShapeField::Domain { rank }) => axes.len() == rank as usize,
+            (ShapeValue::Domain(axes), ShapeField::Domain { rank }) => axes.len() == rank,
             _ => false,
         }
     }
@@ -312,6 +312,9 @@ pub enum Defect {
     /// either, a size of the wrong sort, or a scalar that cannot store its
     /// primitive.
     KindMismatch(Name),
+    /// A port's kind breaks a rule the language states for its form, such
+    /// as a sum with one variant or with a repeated variant name.
+    MalformedKind(Name),
     /// A port's kind holds an Optional directly inside an Optional.
     NestedOptional(Name),
     /// A storage capacity is stated as presence, which is not a size.
@@ -337,8 +340,8 @@ pub enum Defect {
 /// A unit description that passed [`Unit::check`].
 ///
 /// The field is private, so holding one is proof the description passed these
-/// checks: every slot and shape field it names exists; each port's kind is one
-/// whose storage is described and which nests no Optional, and its sizes,
+/// checks: every slot and shape field it names exists; each port's kind is
+/// well formed, nests no Optional and has its storage described, and its sizes,
 /// presence and leaves match it; no capacity is stated as presence; no stage writes an input
 /// or an alias; an alias refers to an input; the capacity of storage, and the
 /// sizes and presence of a result, are known before the stage that writes it; every leaf fits inside one element of its plane and
@@ -397,6 +400,9 @@ impl Unit {
         // A port's sizes and leaves are the ones its kind calls for.
         for port in self.inputs.iter().chain(&self.outputs) {
             let mismatch = Defect::KindMismatch(port.name);
+            if !port.kind.well_formed() {
+                return Err(Defect::MalformedKind(port.name));
+            }
             if port.kind.nests_optional() {
                 return Err(Defect::NestedOptional(port.name));
             }

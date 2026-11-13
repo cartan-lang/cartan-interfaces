@@ -7,16 +7,18 @@
 //! A kind is logical. It says `Int`, not how many bits an Int has, and it says
 //! nothing about where a value is stored. Those are choices a port states.
 //!
-//! Every fiber of the language is named here, so each has one definition.
-//! Naming a fiber does not oblige any component to support it. Where stating
-//! how a fiber is stored would be costly, this module declines to: it answers
-//! "not described" and a component is free to report the fiber as unsupported.
+//! The fibers named here each have one definition. The list is not claimed to
+//! be complete. Naming a fiber does not oblige any component to support it.
+//! Where stating how a fiber is stored would be costly, this module declines
+//! to: it answers "not described" and a component is free to report the
+//! fiber as unsupported.
 //!
 //! There is no kind for a function. Functions are resolved during analysis
 //! and none is a value that crosses a boundary.
 //!
-//! Gap: Structs, Tuples, Lists, Maps and Strings are kinds of the language
-//! that are not written here yet.
+//! Gap: Structs, Tuples, Lists, Maps, Strings, the unit kind `None`, ranges,
+//! boxes and views are kinds of the language that are not written here yet.
+//! A Tuple, including one written `[T; k]`, is not a fiber.
 //!
 //! Gap: a kind is written out in full wherever it is used. That is harmless
 //! for the kinds here but not for Structs nested inside one another with
@@ -34,9 +36,16 @@ pub enum Primitive {
 /// What one site of an Array holds: plain data of fixed width, with no
 /// references and no size that is only known at run time.
 ///
-/// Two fibers are the same exactly when they are equal here. A product or a
-/// sum is identified by its names, their order and their fibers. The name a
-/// fiber was declared under is not part of it.
+/// A product or a sum is identified by its names, their order and their
+/// fibers. The name a fiber was declared under is not part of it.
+///
+/// Gap: a product's declared algebra is also part of its identity and is not
+/// represented here. Two products that differ only in algebra therefore
+/// compare equal, which is wrong.
+///
+/// Gap: being able to write a fiber here does not make it valid. The
+/// language admits a vector only as a real vector space, and has a distinct
+/// dual that is not named here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fiber {
     Bool,
@@ -71,13 +80,6 @@ pub enum Fiber {
     Metric {
         dimension: u32,
     },
-    /// A static list of a stated number of positions, all of one fiber.
-    Repeat {
-        element: Box<Fiber>,
-        count: u32,
-    },
-    /// A static list whose positions each state their own fiber.
-    Positions(Vec<Fiber>),
     /// Named components in order. A component may be any fiber.
     Product(Vec<(String, Fiber)>),
     /// Exactly one of an ordered roster of named variants, each with a
@@ -101,10 +103,9 @@ impl Fiber {
             Fiber::Bool | Fiber::Int | Fiber::Real => Some(1),
             Fiber::Rational | Fiber::Complex => Some(2),
             Fiber::Color => Some(4),
-            Fiber::Vector { element, count } | Fiber::Repeat { element, count } => {
+            Fiber::Vector { element, count } => {
                 element.leaf_count()?.checked_mul(u64::from(*count))
             }
-            Fiber::Positions(positions) => all(positions.iter()),
             Fiber::Product(components) => all(components.iter().map(|(_, fiber)| fiber)),
             Fiber::Sum(variants) => {
                 all(variants.iter().filter_map(|(_, payload)| payload.as_ref()))?.checked_add(1)
@@ -120,10 +121,11 @@ impl Fiber {
     /// The scalars of one value, in order, or nothing if this module does not
     /// describe how the fiber is stored.
     ///
-    /// A vector or static list gives its positions first to last. A product
-    /// gives its components as declared. A sum gives an Int tag holding the
-    /// active variant's position, then the scalars of every variant's payload
-    /// in declared order.
+    /// A vector gives its positions first to last. A product gives its
+    /// components as declared. A sum gives an Int tag holding the active
+    /// variant's position, then the scalars of every variant's payload in
+    /// declared order; the scalars of the variants that are not active hold
+    /// zero.
     ///
     /// Gap: the storage of `SO2`, `SO3`, `Mat`, `Form` and `Metric` is not
     /// described. A port of such a fiber is refused as unsupported.
@@ -131,6 +133,28 @@ impl Fiber {
         let mut leaves = Vec::new();
         self.push_leaves(&mut leaves)?;
         Some(leaves)
+    }
+
+    /// Whether this fiber obeys the rules the language states for its form:
+    /// a vector has at least one component, and a sum has at least two
+    /// variants with distinct names.
+    pub fn well_formed(&self) -> bool {
+        match self {
+            Fiber::Vector { element, count } => *count >= 1 && element.well_formed(),
+            Fiber::Product(components) => components.iter().all(|(_, fiber)| fiber.well_formed()),
+            Fiber::Sum(variants) => {
+                let distinct = variants.iter().enumerate().all(|(index, (name, _))| {
+                    variants[..index].iter().all(|(other, _)| other != name)
+                });
+                variants.len() >= 2
+                    && distinct
+                    && variants
+                        .iter()
+                        .flat_map(|(_, payload)| payload)
+                        .all(Fiber::well_formed)
+            }
+            _ => true,
+        }
     }
 
     fn push_leaves(&self, leaves: &mut Vec<Primitive>) -> Option<()> {
@@ -141,14 +165,9 @@ impl Fiber {
             Fiber::Rational => leaves.extend([Primitive::Int; 2]),
             Fiber::Complex => leaves.extend([Primitive::Real; 2]),
             Fiber::Color => leaves.extend([Primitive::Real; 4]),
-            Fiber::Vector { element, count } | Fiber::Repeat { element, count } => {
+            Fiber::Vector { element, count } => {
                 for _ in 0..*count {
                     element.push_leaves(leaves)?;
-                }
-            }
-            Fiber::Positions(positions) => {
-                for fiber in positions {
-                    fiber.push_leaves(leaves)?;
                 }
             }
             Fiber::Product(components) => {
@@ -213,7 +232,7 @@ pub enum ShapeField {
     /// The number of elements in a List.
     Length,
     /// The domain of an Array: an origin and an extent for each axis.
-    Domain { rank: u8 },
+    Domain { rank: usize },
 }
 
 /// What a value is.
@@ -258,14 +277,20 @@ impl Kind {
     pub fn shape_fields(&self) -> Vec<ShapeField> {
         match self {
             Kind::Fiber(_) => Vec::new(),
-            Kind::Array { axes, .. } => vec![ShapeField::Domain {
-                rank: axes.len() as u8,
-            }],
+            Kind::Array { axes, .. } => vec![ShapeField::Domain { rank: axes.len() }],
             Kind::Optional(inner) => {
                 let mut shape_fields = vec![ShapeField::Presence];
                 shape_fields.extend(inner.shape_fields());
                 shape_fields
             }
+        }
+    }
+
+    /// Whether every fiber in this kind is well formed.
+    pub fn well_formed(&self) -> bool {
+        match self {
+            Kind::Fiber(fiber) | Kind::Array { element: fiber, .. } => fiber.well_formed(),
+            Kind::Optional(inner) => inner.well_formed(),
         }
     }
 
@@ -357,6 +382,12 @@ mod tests {
             Primitive::Real,
         ];
         assert_eq!(shape.leaves(), Some(expected.to_vec()));
+        assert!(shape.well_formed());
+
+        // A roster needs two variants, and their names must differ.
+        let variant = |name: &str| (name.to_string(), None);
+        assert!(!Fiber::Sum(vec![variant("Only")]).well_formed());
+        assert!(!Fiber::Sum(vec![variant("Same"), variant("Same")]).well_formed());
     }
 
     #[test]
