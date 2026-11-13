@@ -42,11 +42,14 @@ pub enum Size {
 }
 
 impl Size {
-    /// How many elements this size describes.
-    pub fn count(&self) -> u64 {
+    /// How many elements this size describes, or nothing if the count does
+    /// not fit in 64 bits.
+    pub fn count(&self) -> Option<u64> {
         match self {
-            Size::Length(length) => *length,
-            Size::Domain(axes) => axes.iter().map(|axis| axis.extent).product(),
+            Size::Length(length) => Some(*length),
+            Size::Domain(axes) => axes
+                .iter()
+                .try_fold(1u64, |count, axis| count.checked_mul(axis.extent)),
         }
     }
 
@@ -293,13 +296,15 @@ pub enum Defect {
 
 /// A unit description that passed [`Unit::check`].
 ///
-/// The field is private, so holding one is proof the description is well
-/// formed. The check covers the description only. It cannot show that the code
-/// honors it.
+/// The field is private, so holding one is proof the description passed these
+/// checks: every slot and dimension it names exists; no stage writes an input
+/// or an alias; an alias refers to an input; storage is written only once its
+/// size has been stated; every leaf fits inside one element of its plane and
+/// overlaps no other. It does not check that every result is written by some
+/// stage, and it cannot show that the code honors the description.
 ///
 /// Decide: how far the runtime trusts code from a supplier it did not build.
-/// On bytecode, Metal and CUDA the runtime hands a stage only the storage it
-/// declared. A Wasm stage can write anywhere in its linear memory.
+/// Nothing in this contract confines code to the storage it declared.
 #[derive(Clone, Debug)]
 pub struct Checked(Unit);
 
@@ -354,10 +359,10 @@ impl Unit {
                 else {
                     return Err(Defect::AliasOfNonInput(*slot));
                 };
-                let end = leaf.offset + leaf.scalar.bytes();
-                if end > need.element_bytes {
-                    return Err(Defect::LeafOutsideElement { leaf: index });
-                }
+                let end = match leaf.offset.checked_add(leaf.scalar.bytes()) {
+                    Some(end) if end <= need.element_bytes => end,
+                    _ => return Err(Defect::LeafOutsideElement { leaf: index }),
+                };
                 for (other, start, stop) in &placed {
                     if *other == leaf.plane && leaf.offset < *stop && *start < end {
                         let first = placed.iter().position(|p| p == &(*other, *start, *stop));

@@ -14,11 +14,12 @@ pub struct BindingId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UpdateId(pub u32);
 
-/// What the source calls a value.
+/// What the source calls a declaration.
 ///
-/// A name is the identity of a value everywhere: in a unit's ports, in the
+/// A name identifies a declaration everywhere: in a unit's ports, in the
 /// runtime's committed State and in a request. Port order and type numbering
-/// are never identity.
+/// are never identity. A name does not identify one value: the same State has
+/// a different value at each version and in each run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Name {
     /// Written by update blocks; belongs to the run.

@@ -26,9 +26,10 @@ pub struct Analysis {
 /// inline. Codegen lowers the inputs it is given and does not choose them.
 ///
 /// Decide: whether the choice may depend on what the runtime already holds.
-/// Made from the source alone, a prepared unit keeps the same inputs for its
-/// whole life. A binding that does not depend on any State an update writes is
-/// the natural input: it is the same on every step.
+/// Either way a prepared unit's inputs never change; a different choice is a
+/// different unit. A binding that depends on no State an update writes is a
+/// candidate for an input, since it is the same on every step, but not an
+/// obligation: a cheap one can stay inline.
 ///
 /// Gap: this is a placeholder. The representation Codegen lowers from is not
 /// written yet.
