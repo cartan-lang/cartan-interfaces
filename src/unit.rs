@@ -141,24 +141,28 @@ pub struct Leaf {
 pub struct Slot(pub u32);
 
 /// What storage a slot needs: which memory, and how much of it as a
-/// compile-time element size times run-time counts.
+/// compile-time element size times a run-time capacity.
 ///
-/// A unit never asks for a number of bytes. It states sizes in the shape
-/// record, and the bytes follow from them.
+/// A unit never asks for a number of bytes, and it never asks at all: this
+/// description is the request. The runtime reads it, with the sizes in the
+/// shape record, and provides the storage before the stage that writes it.
 #[derive(Clone, Debug)]
 pub struct Need {
     pub memory: Memory,
     pub element_bytes: u32,
     pub align: u32,
-    /// The element count is the product of these. Empty means one element.
-    pub count: Vec<Sizing>,
+    /// How many elements the slot must be able to hold: the product of these.
+    /// Empty means one element. Every size here is known before the stage
+    /// that first writes the slot. The value written may be smaller than the
+    /// capacity; its actual sizes are the ones in its port.
+    pub capacity: Vec<Sizing>,
 }
 
 /// What each slot is for. This decides who may write it.
 #[derive(Clone, Debug)]
 pub enum Storage {
-    /// A plane of an input value: the memory, element size and element count
-    /// the unit expects to find. Never written.
+    /// A plane of an input value: the memory, element size and number of
+    /// elements the unit expects to find. Never written.
     Input(Need),
     /// A plane of a result. Written by this unit, then handed to the runtime.
     Output(Need),
@@ -193,26 +197,31 @@ pub struct Port {
 
 /// One entry point in the code. Stages run in order.
 ///
-/// A unit asks for storage by stating sizes: it writes them into the shape
-/// record. The runtime provides the storage a stage writes as soon as its
-/// sizes are known. If an input or an earlier stage settled them, the storage
-/// is there when the stage starts. If the stage itself settles them, because
-/// the size depends on data it computes, the stage asks while running and
-/// waits until the runtime has provided the storage.
+/// Compiled code never calls the runtime. Storage is passed in and sizes are
+/// reported out. A stage receives the storage it reads and writes and the
+/// shape record, computes, writes the sizes it determines into the record and
+/// returns. All providing of storage, and any waiting for it, happens in the
+/// runtime between stages.
 ///
-/// A kernel on a GPU cannot wait part-way through. On Metal and CUDA a result
-/// sized by data needs one stage to measure and a later stage to fill.
+/// A result whose size depends on data the unit computes is handled in one of
+/// two ways. A stage can be given storage with capacity for a bound known
+/// beforehand and report the actual size it produced. Or one stage can
+/// measure and a later stage fill, with the runtime providing storage between
+/// them.
 ///
 /// A stage has no failure to report. Cartan is total, so compiled code always
 /// runs to completion and every outcome it computes is an ordinary value. A
-/// run can still end early, but only for reasons the runtime discovers: it
-/// cannot provide the storage a stage asked for, or the run is cancelled. A
-/// stage whose request is refused is not resumed.
+/// run can still end early, but only for reasons the runtime discovers, such
+/// as being unable to provide storage or being cancelled, and only between
+/// stages.
+///
+/// A stage may do any amount of work, including several updates, as long as it
+/// needs nothing from the runtime while it runs. Where repetition happens is
+/// not part of this contract.
 ///
 /// Gap: the calling convention of a stage on each target is not written yet:
-/// how the entry is named, how slots and the shape record are passed, how a
-/// running stage asks for storage and waits, how a stage waiting on a refused
-/// request is abandoned, and the extent a parallel stage is dispatched over.
+/// how the entry is named, how slots and the shape record are passed, and the
+/// extent a parallel stage is dispatched over.
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub reads: Vec<Slot>,
@@ -264,8 +273,9 @@ pub enum Code {
 pub enum Defect {
     UnknownSlot(Slot),
     UnknownDimension(Dim),
-    /// A stage writes storage whose size is settled by no input, no earlier
-    /// stage and not by the stage itself.
+    /// A stage writes storage whose capacity is settled by no input and no
+    /// earlier stage. Storage is provided before a stage runs, so a stage
+    /// cannot settle the capacity of what it writes.
     SizeNotYetKnown {
         stage: u32,
         dim: Dim,
@@ -302,8 +312,8 @@ pub enum Defect {
 ///
 /// The field is private, so holding one is proof the description passed these
 /// checks: every slot and dimension it names exists; no stage writes an input
-/// or an alias; an alias refers to an input; storage is written only once its
-/// size has been stated; every leaf fits inside one element of its plane and
+/// or an alias; an alias refers to an input; the capacity of storage is known
+/// before the stage that writes it; every leaf fits inside one element of its plane and
 /// overlaps no other. It does not check that every result is written by some
 /// stage, and it cannot show that the code honors the description.
 ///
@@ -335,7 +345,7 @@ impl Unit {
         for (index, entry) in self.storage.iter().enumerate() {
             match entry {
                 Storage::Input(need) | Storage::Output(need) | Storage::Scratch(need) => {
-                    need.count.iter().try_for_each(dim)?
+                    need.capacity.iter().try_for_each(dim)?
                 }
                 Storage::Alias(of) => {
                     if !matches!(storage(*of)?, Storage::Input(_)) {
@@ -400,11 +410,6 @@ impl Unit {
             for slot in &stage.reads {
                 storage(*slot)?;
             }
-            for determined in &stage.determines {
-                *known
-                    .get_mut(determined.0 as usize)
-                    .ok_or(Defect::UnknownDimension(*determined))? = true;
-            }
             for slot in &stage.writes {
                 let (Storage::Output(need) | Storage::Scratch(need)) = storage(*slot)? else {
                     return Err(Defect::WritesShared {
@@ -413,7 +418,7 @@ impl Unit {
                     });
                 };
                 if !std::mem::replace(&mut provided[slot.0 as usize], true) {
-                    for sizing in &need.count {
+                    for sizing in &need.capacity {
                         if let Sizing::Runtime(dim) = sizing {
                             if !known[dim.0 as usize] {
                                 return Err(Defect::SizeNotYetKnown {
@@ -424,6 +429,11 @@ impl Unit {
                         }
                     }
                 }
+            }
+            for determined in &stage.determines {
+                *known
+                    .get_mut(determined.0 as usize)
+                    .ok_or(Defect::UnknownDimension(*determined))? = true;
             }
         }
         for port in &self.outputs {
@@ -450,12 +460,12 @@ mod tests {
     use super::*;
     use crate::program::StateId;
 
-    fn need(element_bytes: u32, count: Vec<Sizing>) -> Need {
+    fn need(element_bytes: u32, capacity: Vec<Sizing>) -> Need {
         Need {
             memory: Memory::Device(0),
             element_bytes,
             align: 8,
-            count,
+            capacity,
         }
     }
 
@@ -493,27 +503,38 @@ mod tests {
     }
 
     #[test]
-    fn storage_needs_a_size_from_an_input_an_earlier_stage_or_the_stage_itself() {
+    fn storage_capacity_is_known_before_the_stage_that_writes_it() {
         let length = || vec![Sizing::Runtime(Dim(0))];
-        let unit = |stages| Unit {
+        let unit = |capacity, stages| Unit {
             outputs: vec![port(length(), Vec::new(), &[0])],
-            storage: vec![Storage::Output(need(8, length()))],
+            storage: vec![Storage::Output(need(8, capacity))],
             dimensions: vec![Dimension::Length],
             stages,
             ..Unit::default()
         };
-        let defect = Defect::SizeNotYetKnown {
+        let late = Defect::SizeNotYetKnown {
             stage: 0,
             dim: Dim(0),
         };
         // Nobody states the length.
-        assert_eq!(unit(vec![stage(&[0], &[])]).check().err(), Some(defect));
+        let never = unit(length(), vec![stage(&[0], &[])]).check();
+        assert_eq!(
+            never.err(),
+            Some(Defect::SizeNotYetKnown {
+                stage: 0,
+                dim: Dim(0)
+            })
+        );
+        // A stage cannot settle the capacity of storage it is already writing.
+        let same = unit(length(), vec![stage(&[0], &[0])]).check();
+        assert_eq!(same.err(), Some(late));
         // One stage measures, the next fills.
-        assert!(unit(vec![stage(&[], &[0]), stage(&[0], &[])])
+        assert!(unit(length(), vec![stage(&[], &[0]), stage(&[0], &[])])
             .check()
             .is_ok());
-        // One stage sizes its own result from data it computes.
-        assert!(unit(vec![stage(&[0], &[0])]).check().is_ok());
+        // One stage fills storage sized for a bound and reports the actual length.
+        let bound = vec![Sizing::Fixed(Size::Length(100))];
+        assert!(unit(bound, vec![stage(&[0], &[0])]).check().is_ok());
     }
 
     #[test]

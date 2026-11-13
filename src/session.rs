@@ -1,9 +1,20 @@
 //! What an application asks of the runtime, and what the runtime reports back.
+//!
+//! The runtime owns a run and its storage. A run may complete many atomic
+//! updates between publications: each update produces the next State, but a
+//! State becomes visible to anything outside the run only when it is
+//! published. Compiled computations supply the transitions and the decisions
+//! about cadence and stopping. Publication exposes one immutable, complete
+//! State with its version and the Params it was computed with. A required
+//! observation may hold back advancement until it is taken; optional
+//! rendering may not. Where the repetition of updates executes is not
+//! specified.
 
 use crate::program::Name;
 use crate::unit::Memory;
 
-/// One committed State of a running program. Each accepted update makes the next.
+/// One State of a running program. Each completed update makes the next,
+/// whether or not it is published.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version(pub u64);
 
@@ -20,7 +31,7 @@ pub enum Stop {
     Cancelled,
     /// An input was missing or did not match the unit's declared port.
     Binding(Name),
-    /// The unit asks for a memory this runtime has not set up.
+    /// The unit names a memory this runtime has not set up.
     Unplaced(Memory),
     /// The code did not do what its own description says, such as leaving a
     /// size unstated. This is a defect in a code generator, not a run-time
@@ -35,8 +46,9 @@ pub enum Stop {
 /// A session coordinates a supplier and the runtime. It is not another
 /// evaluator, and nothing outside the runtime writes State.
 ///
-/// Gap: this is a placeholder. Launching, parameters, cadenced observation,
-/// delivery of results and stopping conditions are not written yet.
+/// Gap: this is a placeholder. Launching, parameters, how publication is
+/// requested or offered, delivery of results and stopping conditions are not
+/// written yet. `advance` states a number of updates, not how they are run.
 pub trait Session {
     /// A computed value. Reading its bytes back is a separate, explicit step.
     type Value;

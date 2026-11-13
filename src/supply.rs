@@ -12,17 +12,17 @@ pub enum Request<'a> {
     /// The initial value of every State. Initial values are closed: they read
     /// no State and no Param. A State that starts absent and is later given a
     /// field computed from Params gets that field from an ordinary binding,
-    /// not from its initial value. The results are committed as the first
-    /// State.
+    /// not from its initial value. The results are the first State.
     Launch,
-    /// One execution of one update block. Reads the committed State, Params
-    /// and upstream bindings, and produces the next value of each State the
-    /// block writes. The results are committed together as the next State.
+    /// One transition of one update block. Reads one State, Params and
+    /// upstream bindings, and produces the next value of each State the block
+    /// writes. Its results together are the next State. A run may make many
+    /// transitions between publications; see `session`.
     Update(UpdateId),
-    /// The values of the named declarations for one committed State. Reads
+    /// The values of the named declarations for one published State. Reads
     /// the same things an update may. A name may be a binding, a Param or a
-    /// State; asking for a State's value reads it. Nothing is committed. The
-    /// names need not have been selected at launch.
+    /// State; asking for a State's value reads it. The State does not change.
+    /// The names need not have been selected at launch.
     Observe(&'a [Name]),
 }
 
@@ -41,7 +41,7 @@ pub struct Emitted {
 /// An input port may name a binding. The supplier chooses, binding by
 /// binding, between computing it inside the unit and having it computed once
 /// and passed in. This is the same kind of choice as fusing or separating
-/// the steps within a unit, made at the unit's edge. When a unit asks for a binding as an input, the runtime
+/// the steps within a unit, made at the unit's edge. When a unit lists a binding as an input, the runtime
 /// must hold that binding's value first, requesting it with `Observe` if it
 /// does not.
 ///
