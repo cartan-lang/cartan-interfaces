@@ -18,17 +18,17 @@ pub struct Analysis {
 /// An indexed value is a domain and a rule giving the value at each site. Its
 /// kind does not say whether its values are kept in memory. That is a fusion
 /// decision.
+///
+/// These two are not required to be the only backings. A value read from
+/// storage at some sites and computed by its rule at the others is neither
+/// designed here nor excluded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Backing {
     /// The values are computed once into storage and read from there.
     Stored,
     /// The values are computed wherever they are read. Nothing is stored.
     Lazy,
-    /// The values are read from storage at the sites the storage covers and
-    /// computed by the rule at every other site.
-    ///
-    /// Gap: how a plan states which sites are covered is not written yet.
-    Partial,
 }
 
 /// One indexed value of a computation that Graph offers a choice of backing
