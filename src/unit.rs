@@ -10,18 +10,21 @@ pub struct Axis {
     pub extent: u64,
 }
 
-/// What a dimension holds once it is known.
+/// What a dimension holds once it is known: a size, or presence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Size {
+    /// Whether an Optional value is present. Not a size; it counts nothing.
+    Presence(bool),
     Length(u64),
     Domain(Vec<Axis>),
 }
 
 impl Size {
-    /// How many elements this size describes, or nothing if the count does
-    /// not fit in 64 bits.
+    /// How many elements this size describes, or nothing if it is presence
+    /// or the count does not fit in 64 bits.
     pub fn count(&self) -> Option<u64> {
         match self {
+            Size::Presence(_) => None,
             Size::Length(length) => Some(*length),
             Size::Domain(axes) => axes
                 .iter()
@@ -31,6 +34,7 @@ impl Size {
 
     pub fn is(&self, dimension: Dimension) -> bool {
         match (self, dimension) {
+            (Size::Presence(_), Dimension::Presence) => true,
             (Size::Length(_), Dimension::Length) => true,
             (Size::Domain(axes), Dimension::Domain { rank }) => axes.len() == rank as usize,
             _ => false,
@@ -42,12 +46,15 @@ impl Size {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dim(pub u32);
 
-/// A size that is either fixed in the code or found in the shape record.
+/// A size or presence that is either fixed in the code or found in the shape
+/// record.
 ///
 /// The shape record is one table per run of a unit, with one entry for each of
 /// the unit's dimensions. The runtime fills the entries that describe inputs.
-/// The unit's stages fill the rest, and that is how a unit states how much
-/// storage it needs.
+/// The unit's stages fill the rest. That is how a unit reports the sizes of
+/// what it produced and whether an Optional result is present, and how the
+/// runtime learns either without reading the value's storage. The sizes of an
+/// absent value are left unset.
 ///
 /// In an input port, `Fixed` is a specialization the runtime verifies against
 /// the actual value before running. A change of extent needs no recompilation
@@ -284,6 +291,10 @@ pub enum Defect {
     /// either, a size of the wrong sort, or a scalar that cannot store its
     /// primitive.
     KindMismatch(Name),
+    /// A port's kind holds an Optional directly inside an Optional.
+    NestedOptional(Name),
+    /// A storage capacity is stated as presence, which is not a size.
+    CapacityNotASize(Slot),
     /// A port's kind includes a fiber whose storage this contract does not
     /// describe yet. The kind is valid; a unit cannot carry it across.
     KindUnsupported(Name),
@@ -306,7 +317,8 @@ pub enum Defect {
 ///
 /// The field is private, so holding one is proof the description passed these
 /// checks: every slot and dimension it names exists; each port's kind is one
-/// whose storage is described, and its sizes and leaves match it; no stage writes an input
+/// whose storage is described and which nests no Optional, and its sizes,
+/// presence and leaves match it; no capacity is stated as presence; no stage writes an input
 /// or an alias; an alias refers to an input; the capacity of storage is known
 /// before the stage that writes it; every leaf fits inside one element of its plane and
 /// overlaps no other. It does not check that every result is written by some
@@ -340,7 +352,18 @@ impl Unit {
         for (index, entry) in self.storage.iter().enumerate() {
             match entry {
                 Storage::Input(need) | Storage::Output(need) | Storage::Scratch(need) => {
-                    need.capacity.iter().try_for_each(dim)?
+                    for sizing in &need.capacity {
+                        dim(sizing)?;
+                        let presence = match sizing {
+                            Sizing::Fixed(size) => matches!(size, Size::Presence(_)),
+                            Sizing::Runtime(dim) => {
+                                self.dimensions[dim.0 as usize] == Dimension::Presence
+                            }
+                        };
+                        if presence {
+                            return Err(Defect::CapacityNotASize(Slot(index as u32)));
+                        }
+                    }
                 }
                 Storage::Alias(of) => {
                     if !matches!(storage(*of)?, Storage::Input(_)) {
@@ -353,6 +376,9 @@ impl Unit {
         // A port's sizes and leaves are the ones its kind calls for.
         for port in self.inputs.iter().chain(&self.outputs) {
             let mismatch = Defect::KindMismatch(port.name);
+            if port.kind.nests_optional() {
+                return Err(Defect::NestedOptional(port.name));
+            }
             let Some(count) = port.kind.leaf_count() else {
                 return Err(Defect::KindUnsupported(port.name));
             };
@@ -632,6 +658,38 @@ mod tests {
         assert_eq!(unit(wrong, vec![out(16)]).check().err(), mismatch);
         let short = vec![leaf(Scalar::F64, 0, 0)];
         assert_eq!(unit(short, vec![out(16)]).check().err(), mismatch);
+    }
+
+    #[test]
+    fn an_optional_result_reports_presence_in_the_shape_record() {
+        // The State of a program that starts absent: an Optional Array.
+        let unit = |kind, capacity| Unit {
+            outputs: vec![Port {
+                name: STATE,
+                kind,
+                shape: vec![Sizing::Runtime(Dim(0)), Sizing::Runtime(Dim(1))],
+                leaves: vec![leaf(Scalar::F64, 0, 0)],
+                planes: vec![Slot(0)],
+            }],
+            storage: vec![Storage::Output(need(8, vec![capacity]))],
+            dimensions: vec![Dimension::Presence, Dimension::Domain { rank: 1 }],
+            stages: vec![stage(&[0], &[0, 1])],
+            ..Unit::default()
+        };
+        let array = || Kind::Array {
+            element: Fiber::Real,
+            axes: vec![AxisKind::Closed],
+        };
+        let optional = || Kind::Optional(Box::new(array()));
+        assert!(unit(optional(), cells(100)).check().is_ok());
+
+        // Presence is not a size, so it cannot state how much storage to provide.
+        let as_capacity = unit(optional(), Sizing::Fixed(Size::Presence(true))).check();
+        assert_eq!(as_capacity.err(), Some(Defect::CapacityNotASize(Slot(0))));
+
+        // An Optional never directly holds an Optional.
+        let nested = unit(Kind::Optional(Box::new(optional())), cells(100)).check();
+        assert_eq!(nested.err(), Some(Defect::NestedOptional(STATE)));
     }
 
     #[test]

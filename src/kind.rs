@@ -185,19 +185,20 @@ pub enum AxisKind {
     Periodic,
 }
 
-/// A kind of size that is only known at run time.
+/// A kind of fact about a value that is only known at run time. A unit's
+/// shape record has one entry for each.
 ///
 /// A value's kind fixes its structure at compile time, including the form of
-/// each Array axis. What compile time cannot fix is where an axis starts and
-/// how many elements there are. Those are the dimensions.
+/// each Array axis. What compile time cannot fix is where an axis starts, how
+/// many elements there are, and whether an Optional value is present.
 ///
-/// The presence of an Optional value is also known only at run time, but it
-/// is not a dimension. It is metadata of a value: it counts nothing, and an
-/// absent value is not an empty one.
-///
-/// Gap: how a port and a value carry presence is not written yet.
+/// Presence shares the record with the sizes but is not a size. It counts
+/// nothing, and an absent value is not an empty one: it has no sizes and no
+/// storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dimension {
+    /// Whether an Optional value is present.
+    Presence,
     /// The number of elements in a List.
     Length,
     /// The domain of an Array: an origin and an extent for each axis.
@@ -215,7 +216,8 @@ pub enum Kind {
     /// domain has and the form of each. Where each axis starts and how far it
     /// extends is not part of the kind.
     Array { element: Fiber, axes: Vec<AxisKind> },
-    /// A value of the inner kind, or absence.
+    /// A value of the inner kind, or absence. Optional kinds do not nest:
+    /// "absent or absent or a value" is the same as "absent or a value".
     Optional(Box<Kind>),
 }
 
@@ -239,15 +241,29 @@ impl Kind {
         }
     }
 
-    /// The run-time sizes of a value of this kind, in order. A port lists one
-    /// size for each, in this order.
+    /// The run-time facts of a value of this kind, in order: presence first
+    /// for an Optional, then the sizes of what it holds. A port lists one
+    /// entry for each, in this order.
     pub fn dimensions(&self) -> Vec<Dimension> {
         match self {
             Kind::Fiber(_) => Vec::new(),
             Kind::Array { axes, .. } => vec![Dimension::Domain {
                 rank: axes.len() as u8,
             }],
-            Kind::Optional(inner) => inner.dimensions(),
+            Kind::Optional(inner) => {
+                let mut dimensions = vec![Dimension::Presence];
+                dimensions.extend(inner.dimensions());
+                dimensions
+            }
+        }
+    }
+
+    /// Whether an Optional directly holds another Optional anywhere in this
+    /// kind.
+    pub fn nests_optional(&self) -> bool {
+        match self {
+            Kind::Optional(inner) => matches!(**inner, Kind::Optional(_)) || inner.nests_optional(),
+            Kind::Fiber(_) | Kind::Array { .. } => false,
         }
     }
 }
@@ -269,7 +285,10 @@ mod tests {
         };
         let state = Kind::Optional(Box::new(field(AxisKind::Closed)));
         assert_eq!(state.leaves(), Some(vec![Primitive::Real; 3]));
-        assert_eq!(state.dimensions(), vec![Dimension::Domain { rank: 1 }]);
+        let facts = vec![Dimension::Presence, Dimension::Domain { rank: 1 }];
+        assert_eq!(state.dimensions(), facts);
+        assert!(!state.nests_optional());
+        assert!(Kind::Optional(Box::new(state.clone())).nests_optional());
         // The form of an axis is part of the kind.
         assert_ne!(field(AxisKind::Closed), field(AxisKind::Periodic));
     }
