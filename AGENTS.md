@@ -32,7 +32,7 @@ standalone clone, the essentials are:
 - Own the contracts between Cartan components: plain types and trait
   signatures, one module per component's side. The only logic is checking that
   a description is well formed. The crate has no dependencies.
-- Keep the two layers. The runtime-facing modules (`program`, `unit`, `supply`,
+- Keep the two layers. The runtime-facing modules (`kind`, `program`, `unit`, `supply`,
   `session`) import nothing from the pipeline modules (`syntax`, `graph`,
   `codegen`, `compile`), which sit behind the default `pipeline` feature.
 - A change here is an agreement between the components on both sides of a

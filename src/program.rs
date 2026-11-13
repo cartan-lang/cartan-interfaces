@@ -1,6 +1,6 @@
 //! What a program lets you name.
 
-use crate::unit::Schema;
+use crate::kind::Kind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StateId(pub u32);
@@ -36,7 +36,7 @@ pub enum Name {
 pub struct Declared {
     pub name: Name,
     pub label: String,
-    pub schema: Schema,
+    pub kind: Kind,
 }
 
 /// Everything one analyzed source declares.

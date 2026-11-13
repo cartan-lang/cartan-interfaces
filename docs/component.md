@@ -22,6 +22,8 @@ equivalents.
 The runtime-facing modules are everything a runtime needs from a compiler and
 everything an application needs from a runtime:
 
+- `kind` says what a value is: fibers, Arrays with the form of each axis, and
+  Optional values. It holds the language's kinds, not the rules that assign them.
 - `program` names what a source declares: States, Params, bindings and update
   blocks.
 - `unit` describes one piece of compiled code: its inputs and results, their
