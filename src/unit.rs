@@ -230,6 +230,17 @@ pub struct Stage {
 
 /// Everything the runtime needs to know to run a piece of compiled code.
 ///
+/// The job of a unit is to supply values at requested sites of indexed
+/// values. The values it reads and the values it produces are held in
+/// memory. That does not require a fresh copy; see `Storage::Alias`.
+///
+/// A value's domain is where it has values at all. It is distinct from the
+/// sites a unit is asked to fill on one run, and from the sites that storage
+/// currently covers. A size in a port is the value's domain.
+///
+/// Gap: how the sites asked for and the sites storage covers are stated,
+/// when they are not the whole domain, is not written yet.
+///
 /// There is one kind of unit. A scalar result, an Array fill, a multi-stage
 /// update and a fused kernel differ only in how many ports, slots and stages
 /// they list. A unit asked for by an update and a unit asked for by an

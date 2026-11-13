@@ -13,26 +13,63 @@ pub struct Analysis {
     _private: (),
 }
 
-/// How one Array of a computation is held.
+/// How one indexed value of a computation is held.
 ///
-/// An Array is a domain and a rule giving the fiber at each site. Its kind
-/// does not say whether its elements are kept in memory. That is a fusion
-/// decision, made for each Array of a computation.
+/// An indexed value is a domain and a rule giving the value at each site. Its
+/// kind does not say whether its values are kept in memory. That is a fusion
+/// decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backing {
-    /// The elements are computed once into storage and read from there.
+    /// The values are computed once into storage and read from there.
     Stored,
-    /// The elements are computed wherever they are read. Nothing is stored.
+    /// The values are computed wherever they are read. Nothing is stored.
     Lazy,
+    /// The values are read from storage at the sites the storage covers and
+    /// computed by the rule at every other site.
+    ///
+    /// Gap: how a plan states which sites are covered is not written yet.
+    Partial,
 }
 
-/// One fusion plan for one request: which values the computation takes as
-/// inputs, and the backing of every Array inside it.
+/// One indexed value of a computation that Graph offers a choice of backing
+/// for.
 ///
-/// Gap: this is a placeholder. How a plan is described and compared is not
-/// written yet.
+/// An Array the source names and an intermediate that only exists while a
+/// comprehension body is evaluated at one index lower the same way: each is a
+/// value at an index. Graph decides which of them are eligible to be held in
+/// storage. It does not offer every temporary, and it does not leave one out
+/// only because the source gave it no name.
+///
+/// Gap: how Graph finds candidates, and what identifies one beyond its place
+/// in this list, is not written yet.
+#[derive(Clone, Debug)]
+pub struct Candidate {
+    /// What to call it when showing a plan to a person.
+    pub label: String,
+    /// The one backing it can have, when there is no choice. A result is
+    /// always stored. A value unbounded on some axis is never stored whole.
+    pub forced: Option<Backing>,
+}
+
+/// One fusion plan for one request: a backing for each candidate, in the
+/// order the navigator lists them.
+///
+/// A plan is a complete selection and can be written down and asked for
+/// directly, for example as one character per candidate. With two backings
+/// to choose from, the plans for `n` candidates are the corners of an
+/// `n`-cube. That is a way to name plans. It does not mean every corner is
+/// admissible, or that changing one candidate at a time reaches every
+/// admissible plan.
+///
+/// Decide: the order of candidates is fixed for one analyzed request. Whether
+/// a written plan still means the same thing after the source changes is not
+/// settled, so a plan is not yet something to save and replay.
+///
+/// Gap: a stored value may be computed inside the computation or taken as an
+/// input from outside it. A plan does not yet say which.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
-    _private: (),
+    pub backing: Vec<Backing>,
 }
 
 /// A normalized computation under one fusion plan.
@@ -41,48 +78,58 @@ pub struct Plan {
 /// made later. One pipeline serves all three; the request selects roots and
 /// does not select a different compiler.
 ///
-/// Every Array in it is a domain and a rule for the fiber at each site, with
-/// the backing its plan chose. A lazy Array's rule is fully known when the
-/// computation is lowered and is evaluated in place wherever the Array is
-/// read; it is not a value, is never stored and never leaves the
-/// computation. An Array that is unbounded on some axis can only be lazy.
+/// An indexed computation supplies values at requested sites. Every indexed
+/// value in it is a domain and a rule for the value at each site, with the
+/// backing its plan chose. A rule is ordinary scoped computation: it may read
+/// other values at fixed offsets, at computed indices, or across a whole
+/// domain inside a reduction. A rule that is not stored is fully known when
+/// the computation is lowered and is evaluated in place wherever the value is
+/// read; it is not a value of the language and never leaves the computation.
 /// Codegen lowers the backing it is given and does not choose it.
 ///
 /// A computation's edge is the same decision one step out. An upstream
 /// binding is either an input, computed once and held by the runtime, or
-/// part of the computation. Every input and every result is stored.
+/// part of the computation. Every input and every result is stored. That
+/// does not require a fresh copy: a result may share storage that already
+/// exists and will not change.
 ///
-/// No Array is sized from its own contents. A domain may depend on data, but
-/// only on values computed before the Array is filled, such as a site of
+/// No indexed value is sized from its own contents. A domain may depend on
+/// data, but only on values computed before it is filled, such as a site of
 /// Ints held by an upstream Array.
 ///
+/// Gap: an Array unbounded on some axis cannot be stored whole, yet every
+/// result is stored. Whether a finite window of one is a separate finite
+/// result or a partly stored form of the original is not settled.
+///
 /// Gap: this is a placeholder. The representation Codegen lowers from, and
-/// how a domain and an element rule are written in it, are not written yet.
+/// how a domain and a rule are written in it, are not written yet.
 pub struct Computation {
     _private: (),
 }
 
 /// Graph's offer of fusion plans for one request.
 ///
-/// Graph does not hand over one computation. It offers the plans it can
-/// produce and lets whoever chooses steer among them. A fixed sequence of
-/// candidate plans is the simplest navigator.
+/// Graph does not hand over one computation. It lists the candidates it
+/// exposes and turns any plan over them into a computation, or says why that
+/// plan cannot be had. A plan chooses backing only for those candidates.
+/// Choosing by hand and searching systematically are the same interface with
+/// a different chooser.
 ///
-/// Decide: who steers, and whether the choice may depend on what the runtime
+/// Decide: who chooses, and whether the choice may depend on what the runtime
 /// already holds. Either way a prepared unit's inputs never change; a
 /// different plan is a different unit. A binding that depends on no State an
 /// update writes is a candidate for an input, since it is the same on every
 /// step, but not an obligation: a cheap one can stay inline.
-///
-/// Gap: how a navigator is steered from one plan to another is not written
-/// yet.
 pub trait Navigate {
     type Diagnostic;
 
-    /// The plan Graph proposes when nobody steers.
+    /// The candidates, in the order a plan lists their backings.
+    fn candidates(&self) -> &[Candidate];
+
+    /// The plan Graph proposes when nobody chooses.
     fn start(&self) -> Plan;
 
-    /// The computation one plan describes.
+    /// The computation one plan describes, or why that plan is not available.
     fn computation(&self, plan: &Plan) -> Result<Computation, Self::Diagnostic>;
 }
 
