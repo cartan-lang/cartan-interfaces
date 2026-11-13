@@ -175,7 +175,9 @@ impl Fiber {
 }
 
 /// The form of one axis of an Array. It is part of the Array's kind, so two
-/// Arrays whose axes differ in form are different kinds.
+/// Arrays whose axes differ in form are different kinds. A kind always states
+/// the form of every axis; a written type that states only a rank means every
+/// axis is closed.
 ///
 /// Gap: how the stored part of an axis that is open at an end is described,
 /// given that only a finite part can be stored, is not written yet.
@@ -205,7 +207,7 @@ pub enum AxisKind {
 /// storage and its sizes do not apply: they are neither read nor used to
 /// decide how much storage to provide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Dimension {
+pub enum ShapeField {
     /// Whether an Optional value is present.
     Presence,
     /// The number of elements in a List.
@@ -253,16 +255,16 @@ impl Kind {
     /// The run-time facts of a value of this kind, in order: presence first
     /// for an Optional, then the sizes of what it holds. A port lists one
     /// entry for each, in this order.
-    pub fn dimensions(&self) -> Vec<Dimension> {
+    pub fn shape_fields(&self) -> Vec<ShapeField> {
         match self {
             Kind::Fiber(_) => Vec::new(),
-            Kind::Array { axes, .. } => vec![Dimension::Domain {
+            Kind::Array { axes, .. } => vec![ShapeField::Domain {
                 rank: axes.len() as u8,
             }],
             Kind::Optional(inner) => {
-                let mut dimensions = vec![Dimension::Presence];
-                dimensions.extend(inner.dimensions());
-                dimensions
+                let mut shape_fields = vec![ShapeField::Presence];
+                shape_fields.extend(inner.shape_fields());
+                shape_fields
             }
         }
     }
@@ -294,8 +296,8 @@ mod tests {
         };
         let state = Kind::Optional(Box::new(field(AxisKind::Closed)));
         assert_eq!(state.leaves(), Some(vec![Primitive::Real; 3]));
-        let facts = vec![Dimension::Presence, Dimension::Domain { rank: 1 }];
-        assert_eq!(state.dimensions(), facts);
+        let facts = vec![ShapeField::Presence, ShapeField::Domain { rank: 1 }];
+        assert_eq!(state.shape_fields(), facts);
         assert!(!state.nests_optional());
         assert!(Kind::Optional(Box::new(state.clone())).nests_optional());
         // The form of an axis is part of the kind.

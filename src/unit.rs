@@ -1,6 +1,6 @@
 //! The description of one piece of compiled code.
 
-use crate::kind::{Dimension, Kind, Primitive};
+use crate::kind::{Kind, Primitive, ShapeField};
 use crate::program::Name;
 
 /// One axis of an Array domain.
@@ -10,47 +10,47 @@ pub struct Axis {
     pub extent: u64,
 }
 
-/// What a dimension holds once it is known: a size, or presence.
+/// What a shape field holds once it is known: a size, or presence.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Size {
+pub enum ShapeValue {
     /// Whether an Optional value is present. Not a size; it counts nothing.
     Presence(bool),
     Length(u64),
     Domain(Vec<Axis>),
 }
 
-impl Size {
+impl ShapeValue {
     /// How many elements this size describes, or nothing if it is presence
     /// or the count does not fit in 64 bits.
     pub fn count(&self) -> Option<u64> {
         match self {
-            Size::Presence(_) => None,
-            Size::Length(length) => Some(*length),
-            Size::Domain(axes) => axes
+            ShapeValue::Presence(_) => None,
+            ShapeValue::Length(length) => Some(*length),
+            ShapeValue::Domain(axes) => axes
                 .iter()
                 .try_fold(1u64, |count, axis| count.checked_mul(axis.extent)),
         }
     }
 
-    pub fn is(&self, dimension: Dimension) -> bool {
-        match (self, dimension) {
-            (Size::Presence(_), Dimension::Presence) => true,
-            (Size::Length(_), Dimension::Length) => true,
-            (Size::Domain(axes), Dimension::Domain { rank }) => axes.len() == rank as usize,
+    pub fn is(&self, field: ShapeField) -> bool {
+        match (self, field) {
+            (ShapeValue::Presence(_), ShapeField::Presence) => true,
+            (ShapeValue::Length(_), ShapeField::Length) => true,
+            (ShapeValue::Domain(axes), ShapeField::Domain { rank }) => axes.len() == rank as usize,
             _ => false,
         }
     }
 }
 
-/// Position of one dimension in a unit's shape record.
+/// Position of one shape field in a unit's shape record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Dim(pub u32);
+pub struct ShapeRef(pub u32);
 
 /// A size or presence that is either fixed in the code or found in the shape
 /// record.
 ///
 /// The shape record is one table per run of a unit, with one entry for each of
-/// the unit's dimensions. The runtime fills the entries that describe inputs.
+/// the unit's shape fields. The runtime fills the entries that describe inputs.
 /// The unit's stages fill the rest. That is how a unit reports the sizes of
 /// what it produced and whether an Optional result is present, and how the
 /// runtime learns either without reading the value's storage.
@@ -65,9 +65,9 @@ pub struct Dim(pub u32);
 /// the actual value before running. A change of extent needs no recompilation
 /// unless the code chose to specialize on it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Sizing {
-    Fixed(Size),
-    Runtime(Dim),
+pub enum ShapeEntry {
+    Fixed(ShapeValue),
+    Runtime(ShapeRef),
 }
 
 /// Where a piece of storage lives.
@@ -151,7 +151,7 @@ pub struct Need {
     /// How many elements the slot must be able to hold: the product of these.
     /// Empty means one element. Every size here is known before the stage
     /// that first writes the slot.
-    pub capacity: Vec<Sizing>,
+    pub capacity: Vec<ShapeEntry>,
 }
 
 /// What each slot is for. This decides who may write it.
@@ -175,7 +175,7 @@ pub enum Storage {
 
 /// One value entering or leaving a unit: its kind, its sizes and its physical
 /// layout. The kind says what the value is. The sizes and leaves must match
-/// it: one size for each of the kind's dimensions and one leaf for each of
+/// it: one entry for each of the kind's shape fields and one leaf for each of
 /// its scalars, in the kind's order.
 ///
 /// Decide: a value is bound to a port only if their layouts are identical.
@@ -185,8 +185,8 @@ pub enum Storage {
 pub struct Port {
     pub name: Name,
     pub kind: Kind,
-    /// One entry per dimension of the kind, in the kind's order.
-    pub shape: Vec<Sizing>,
+    /// One entry per shape field of the kind, in the kind's order.
+    pub shape: Vec<ShapeEntry>,
     /// One entry per scalar of the kind, in the kind's order.
     ///
     /// Gap: listing every scalar writes a repeated fiber out in full, so a
@@ -230,7 +230,7 @@ pub struct Stage {
     pub reads: Vec<Slot>,
     pub writes: Vec<Slot>,
     /// Dimensions this stage writes into the shape record.
-    pub determines: Vec<Dim>,
+    pub determines: Vec<ShapeRef>,
 }
 
 /// Everything the runtime needs to know to run a piece of compiled code.
@@ -259,7 +259,7 @@ pub struct Unit {
     pub outputs: Vec<Port>,
     pub storage: Vec<Storage>,
     /// The layout of the shape record: every size not fixed at compile time.
-    pub dimensions: Vec<Dimension>,
+    pub shape_fields: Vec<ShapeField>,
     pub stages: Vec<Stage>,
 }
 
@@ -286,17 +286,17 @@ pub enum Code {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Defect {
     UnknownSlot(Slot),
-    UnknownDimension(Dim),
+    UnknownShapeField(ShapeRef),
     /// A stage writes storage whose capacity, or a result whose size or
     /// presence, is settled by no input and no earlier stage. Storage is
     /// provided before a stage runs, and no value is sized from its own
     /// contents, so a stage cannot settle either for what it writes.
-    SizeNotYetKnown {
+    ShapeNotYetKnown {
         stage: u32,
-        dim: Dim,
+        field: ShapeRef,
     },
     /// A result's size is never determined.
-    ResultSizeUnknown(Dim),
+    ResultShapeUnknown(ShapeRef),
     /// An input port names a slot that is not `Storage::Input`.
     InputPlaneNotInput(Slot),
     /// An output port names a slot that is neither `Output` nor `Alias`.
@@ -337,7 +337,7 @@ pub enum Defect {
 /// A unit description that passed [`Unit::check`].
 ///
 /// The field is private, so holding one is proof the description passed these
-/// checks: every slot and dimension it names exists; each port's kind is one
+/// checks: every slot and shape field it names exists; each port's kind is one
 /// whose storage is described and which nests no Optional, and its sizes,
 /// presence and leaves match it; no capacity is stated as presence; no stage writes an input
 /// or an alias; an alias refers to an input; the capacity of storage, and the
@@ -364,21 +364,21 @@ impl Unit {
                 .get(slot.0 as usize)
                 .ok_or(Defect::UnknownSlot(slot))
         };
-        let dim = |sizing: &Sizing| match sizing {
-            Sizing::Runtime(dim) if dim.0 as usize >= self.dimensions.len() => {
-                Err(Defect::UnknownDimension(*dim))
+        let exists = |entry: &ShapeEntry| match entry {
+            ShapeEntry::Runtime(field) if field.0 as usize >= self.shape_fields.len() => {
+                Err(Defect::UnknownShapeField(*field))
             }
             _ => Ok(()),
         };
         for (index, entry) in self.storage.iter().enumerate() {
             match entry {
                 Storage::Input(need) | Storage::Output(need) | Storage::Scratch(need) => {
-                    for sizing in &need.capacity {
-                        dim(sizing)?;
-                        let presence = match sizing {
-                            Sizing::Fixed(size) => matches!(size, Size::Presence(_)),
-                            Sizing::Runtime(dim) => {
-                                self.dimensions[dim.0 as usize] == Dimension::Presence
+                    for entry in &need.capacity {
+                        exists(entry)?;
+                        let presence = match entry {
+                            ShapeEntry::Fixed(value) => matches!(value, ShapeValue::Presence(_)),
+                            ShapeEntry::Runtime(field) => {
+                                self.shape_fields[field.0 as usize] == ShapeField::Presence
                             }
                         };
                         if presence {
@@ -403,17 +403,17 @@ impl Unit {
             let Some(count) = port.kind.leaf_count() else {
                 return Err(Defect::KindUnsupported(port.name));
             };
-            let dimensions = port.kind.dimensions();
-            if dimensions.len() != port.shape.len() || count != port.leaves.len() as u64 {
+            let shape_fields = port.kind.shape_fields();
+            if shape_fields.len() != port.shape.len() || count != port.leaves.len() as u64 {
                 return Err(mismatch);
             }
             let Some(primitives) = port.kind.leaves() else {
                 return Err(Defect::KindUnsupported(port.name));
             };
-            for (dimension, sizing) in dimensions.iter().zip(&port.shape) {
-                let fits = match sizing {
-                    Sizing::Fixed(size) => size.is(*dimension),
-                    Sizing::Runtime(dim) => self.dimensions.get(dim.0 as usize) == Some(dimension),
+            for (field, entry) in shape_fields.iter().zip(&port.shape) {
+                let fits = match entry {
+                    ShapeEntry::Fixed(value) => value.is(*field),
+                    ShapeEntry::Runtime(at) => self.shape_fields.get(at.0 as usize) == Some(field),
                 };
                 if !fits {
                     return Err(mismatch);
@@ -462,12 +462,12 @@ impl Unit {
         }
 
         // A size is known once an input supplies it or a stage determines it.
-        let mut known = vec![false; self.dimensions.len()];
+        let mut known = vec![false; self.shape_fields.len()];
         for port in &self.inputs {
-            for sizing in &port.shape {
-                dim(sizing)?;
-                if let Sizing::Runtime(dim) = sizing {
-                    known[dim.0 as usize] = true;
+            for entry in &port.shape {
+                exists(entry)?;
+                if let ShapeEntry::Runtime(field) = entry {
+                    known[field.0 as usize] = true;
                 }
             }
             for slot in &port.planes {
@@ -491,12 +491,12 @@ impl Unit {
                 };
                 if !std::mem::replace(&mut provided[slot.0 as usize], true) {
                     let of_result = result_of(*slot).map(|port| port.shape.iter());
-                    for sizing in need.capacity.iter().chain(of_result.into_iter().flatten()) {
-                        if let Sizing::Runtime(dim) = sizing {
-                            if !known[dim.0 as usize] {
-                                return Err(Defect::SizeNotYetKnown {
+                    for entry in need.capacity.iter().chain(of_result.into_iter().flatten()) {
+                        if let ShapeEntry::Runtime(field) = entry {
+                            if !known[field.0 as usize] {
+                                return Err(Defect::ShapeNotYetKnown {
                                     stage: index as u32,
-                                    dim: *dim,
+                                    field: *field,
                                 });
                             }
                         }
@@ -506,15 +506,15 @@ impl Unit {
             for determined in &stage.determines {
                 *known
                     .get_mut(determined.0 as usize)
-                    .ok_or(Defect::UnknownDimension(*determined))? = true;
+                    .ok_or(Defect::UnknownShapeField(*determined))? = true;
             }
         }
         for port in &self.outputs {
-            for sizing in &port.shape {
-                dim(sizing)?;
-                if let Sizing::Runtime(dim) = sizing {
-                    if !known[dim.0 as usize] {
-                        return Err(Defect::ResultSizeUnknown(*dim));
+            for entry in &port.shape {
+                exists(entry)?;
+                if let ShapeEntry::Runtime(field) = entry {
+                    if !known[field.0 as usize] {
+                        return Err(Defect::ResultShapeUnknown(*field));
                     }
                 }
             }
@@ -536,7 +536,7 @@ mod tests {
 
     const STATE: Name = Name::State(StateId(0));
 
-    fn need(element_bytes: u32, capacity: Vec<Sizing>) -> Need {
+    fn need(element_bytes: u32, capacity: Vec<ShapeEntry>) -> Need {
         Need {
             memory: Memory::Device(0),
             element_bytes,
@@ -554,7 +554,7 @@ mod tests {
     }
 
     /// A rank-1 Array of Reals in one plane.
-    fn field(domain: Sizing, slot: u32) -> Port {
+    fn field(domain: ShapeEntry, slot: u32) -> Port {
         Port {
             name: STATE,
             kind: Kind::Array {
@@ -567,8 +567,8 @@ mod tests {
         }
     }
 
-    fn cells(count: u64) -> Sizing {
-        Sizing::Fixed(Size::Domain(vec![Axis {
+    fn cells(count: u64) -> ShapeEntry {
+        ShapeEntry::Fixed(ShapeValue::Domain(vec![Axis {
             origin: 0,
             extent: count,
         }]))
@@ -578,7 +578,7 @@ mod tests {
         Stage {
             reads: Vec::new(),
             writes: writes.iter().map(|slot| Slot(*slot)).collect(),
-            determines: determines.iter().map(|dim| Dim(*dim)).collect(),
+            determines: determines.iter().map(|field| ShapeRef(*field)).collect(),
         }
     }
 
@@ -599,17 +599,17 @@ mod tests {
 
     #[test]
     fn storage_capacity_is_known_before_the_stage_that_writes_it() {
-        let domain = || Sizing::Runtime(Dim(0));
+        let domain = || ShapeEntry::Runtime(ShapeRef(0));
         let unit = |capacity, stages| Unit {
             outputs: vec![field(domain(), 0)],
             storage: vec![Storage::Output(need(8, vec![capacity]))],
-            dimensions: vec![Dimension::Domain { rank: 1 }],
+            shape_fields: vec![ShapeField::Domain { rank: 1 }],
             stages,
             ..Unit::default()
         };
-        let late = Defect::SizeNotYetKnown {
+        let late = Defect::ShapeNotYetKnown {
             stage: 0,
-            dim: Dim(0),
+            field: ShapeRef(0),
         };
         // Nobody states the domain.
         let never = unit(domain(), vec![stage(&[0], &[])]).check();
@@ -692,12 +692,15 @@ mod tests {
             outputs: vec![Port {
                 name: STATE,
                 kind,
-                shape: vec![Sizing::Runtime(Dim(0)), Sizing::Runtime(Dim(1))],
+                shape: vec![
+                    ShapeEntry::Runtime(ShapeRef(0)),
+                    ShapeEntry::Runtime(ShapeRef(1)),
+                ],
                 leaves: vec![leaf(Scalar::F64, 0, 0)],
                 planes: vec![Slot(0)],
             }],
             storage: vec![Storage::Output(need(8, vec![capacity]))],
-            dimensions: vec![Dimension::Presence, Dimension::Domain { rank: 1 }],
+            shape_fields: vec![ShapeField::Presence, ShapeField::Domain { rank: 1 }],
             stages: vec![stage(&[], &[0, 1]), stage(&[0], &[])],
             ..Unit::default()
         };
@@ -706,10 +709,12 @@ mod tests {
             axes: vec![AxisKind::Closed],
         };
         let optional = || Kind::Optional(Box::new(array()));
-        assert!(unit(optional(), Sizing::Runtime(Dim(1))).check().is_ok());
+        assert!(unit(optional(), ShapeEntry::Runtime(ShapeRef(1)))
+            .check()
+            .is_ok());
 
         // Presence is not a size, so it cannot state how much storage to provide.
-        let as_capacity = unit(optional(), Sizing::Fixed(Size::Presence(true))).check();
+        let as_capacity = unit(optional(), ShapeEntry::Fixed(ShapeValue::Presence(true))).check();
         assert_eq!(as_capacity.err(), Some(Defect::CapacityNotASize(Slot(0))));
 
         // An Optional never directly holds an Optional.
