@@ -1,6 +1,6 @@
 //! The description of one piece of compiled code.
 
-use crate::kind::{Kind, Primitive, ShapeField};
+use crate::kind::{KindDefect, KindRef, Kinds, Primitive, ShapeField};
 use crate::program::Name;
 
 /// One axis of an Array domain.
@@ -90,8 +90,10 @@ pub enum Memory {
 
 /// A machine scalar: how one leaf of a value is stored.
 ///
-/// Decide: an Int is stored as `I32` or `I64` and a Real as `F32` or `F64`.
-/// How a Bool is stored is not settled, so any scalar is accepted for one.
+/// An Int is stored as `I32` or `I64` and a Real as `F32` or `F64`. A Bool
+/// is stored as `I32` holding 0 for false or 1 for true; no other value is a
+/// Bool. The check on a description cannot see the stored values, so keeping
+/// to 0 and 1 is the duty of whoever writes one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scalar {
     I32,
@@ -104,7 +106,7 @@ impl Scalar {
     /// Whether this scalar can store the given primitive.
     pub fn stores(self, primitive: Primitive) -> bool {
         match primitive {
-            Primitive::Bool => true,
+            Primitive::Bool => self == Scalar::I32,
             Primitive::Int => matches!(self, Scalar::I32 | Scalar::I64),
             Primitive::Real => matches!(self, Scalar::F32 | Scalar::F64),
         }
@@ -184,7 +186,8 @@ pub enum Storage {
 #[derive(Clone, Debug)]
 pub struct Port {
     pub name: Name,
-    pub kind: Kind,
+    /// A reference into the unit's table of kinds.
+    pub kind: KindRef,
     /// One entry per shape field of the kind, in the kind's order.
     pub shape: Vec<ShapeEntry>,
     /// One entry per scalar of the kind, in the kind's order.
@@ -255,6 +258,8 @@ pub struct Stage {
 /// of a State is not the same as writing it.
 #[derive(Clone, Debug, Default)]
 pub struct Unit {
+    /// Every kind the ports use, each stated once.
+    pub kinds: Kinds,
     pub inputs: Vec<Port>,
     pub outputs: Vec<Port>,
     pub storage: Vec<Storage>,
@@ -312,11 +317,10 @@ pub enum Defect {
     /// either, a size of the wrong sort, or a scalar that cannot store its
     /// primitive.
     KindMismatch(Name),
-    /// A port's kind breaks a rule the language states for its form, such
-    /// as a sum with one variant or with a repeated variant name.
-    MalformedKind(Name),
-    /// A port's kind holds an Optional directly inside an Optional.
-    NestedOptional(Name),
+    /// The unit's table of kinds is not well formed.
+    Kind(KindDefect),
+    /// A port refers to a kind that is not in the unit's table.
+    UnknownKind(Name),
     /// A storage capacity is stated as presence, which is not a size.
     CapacityNotASize(Slot),
     /// A port's kind includes a fiber whose storage this contract does not
@@ -340,8 +344,9 @@ pub enum Defect {
 /// A unit description that passed [`Unit::check`].
 ///
 /// The field is private, so holding one is proof the description passed these
-/// checks: every slot and shape field it names exists; each port's kind is
-/// well formed, nests no Optional and has its storage described, and its sizes,
+/// checks: the table of kinds is well formed and states each kind once;
+/// every slot and shape field named exists; each port's kind has its storage
+/// described, and its sizes,
 /// presence and leaves match it; no capacity is stated as presence; no stage writes an input
 /// or an alias; an alias refers to an input; the capacity of storage, and the
 /// sizes and presence of a result, are known before the stage that writes it; every leaf fits inside one element of its plane and
@@ -397,23 +402,23 @@ impl Unit {
             }
         }
 
-        // A port's sizes and leaves are the ones its kind calls for.
+        // Each kind is stated once and well formed, and a port's sizes and
+        // leaves are the ones its kind calls for.
+        self.kinds.check().map_err(Defect::Kind)?;
+        let counts = self.kinds.leaf_counts();
         for port in self.inputs.iter().chain(&self.outputs) {
             let mismatch = Defect::KindMismatch(port.name);
-            if !port.kind.well_formed() {
-                return Err(Defect::MalformedKind(port.name));
-            }
-            if port.kind.nests_optional() {
-                return Err(Defect::NestedOptional(port.name));
-            }
-            let Some(count) = port.kind.leaf_count() else {
+            let Some(count) = counts.get(port.kind.0 as usize) else {
+                return Err(Defect::UnknownKind(port.name));
+            };
+            let Some(count) = *count else {
                 return Err(Defect::KindUnsupported(port.name));
             };
-            let shape_fields = port.kind.shape_fields();
+            let shape_fields = self.kinds.shape_fields(port.kind);
             if shape_fields.len() != port.shape.len() || count != port.leaves.len() as u64 {
                 return Err(mismatch);
             }
-            let Some(primitives) = port.kind.leaves() else {
+            let Some(primitives) = self.kinds.leaves(port.kind) else {
                 return Err(Defect::KindUnsupported(port.name));
             };
             for (field, entry) in shape_fields.iter().zip(&port.shape) {
@@ -537,7 +542,7 @@ impl Unit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kind::{AxisKind, Fiber};
+    use crate::kind::{AxisKind, Definition};
     use crate::program::StateId;
 
     const STATE: Name = Name::State(StateId(0));
@@ -559,18 +564,27 @@ mod tests {
         }
     }
 
-    /// A rank-1 Array of Reals in one plane.
-    fn field(domain: ShapeEntry, slot: u32) -> Port {
-        Port {
+    fn array(kinds: &mut Kinds, element: Definition) -> KindRef {
+        let element = kinds.define(element);
+        kinds.define(Definition::Array {
+            element,
+            axes: vec![AxisKind::Closed],
+        })
+    }
+
+    /// A table holding a rank-1 Array of Reals, and a port of that kind in
+    /// one plane.
+    fn field(domain: ShapeEntry, slot: u32) -> (Kinds, Port) {
+        let mut kinds = Kinds::default();
+        let kind = array(&mut kinds, Definition::Real);
+        let port = Port {
             name: STATE,
-            kind: Kind::Array {
-                element: Fiber::Real,
-                axes: vec![AxisKind::Closed],
-            },
+            kind,
             shape: vec![domain],
             leaves: vec![leaf(Scalar::F64, 0, 0)],
             planes: vec![Slot(slot)],
-        }
+        };
+        (kinds, port)
     }
 
     fn cells(count: u64) -> ShapeEntry {
@@ -590,8 +604,10 @@ mod tests {
 
     #[test]
     fn a_stage_that_writes_its_input_is_refused() {
+        let (kinds, port) = field(cells(4), 0);
         let unit = Unit {
-            inputs: vec![field(cells(4), 0)],
+            kinds,
+            inputs: vec![port],
             storage: vec![Storage::Input(need(8, vec![cells(4)]))],
             stages: vec![stage(&[0], &[])],
             ..Unit::default()
@@ -606,12 +622,16 @@ mod tests {
     #[test]
     fn storage_capacity_is_known_before_the_stage_that_writes_it() {
         let domain = || ShapeEntry::Runtime(ShapeRef(0));
-        let unit = |capacity, stages| Unit {
-            outputs: vec![field(domain(), 0)],
-            storage: vec![Storage::Output(need(8, vec![capacity]))],
-            shape_fields: vec![ShapeField::Domain { rank: 1 }],
-            stages,
-            ..Unit::default()
+        let unit = |capacity, stages| {
+            let (kinds, port) = field(domain(), 0);
+            Unit {
+                kinds,
+                outputs: vec![port],
+                storage: vec![Storage::Output(need(8, vec![capacity]))],
+                shape_fields: vec![ShapeField::Domain { rank: 1 }],
+                stages,
+                ..Unit::default()
+            }
         };
         let late = Defect::ShapeNotYetKnown {
             stage: 0,
@@ -632,32 +652,47 @@ mod tests {
         assert_eq!(own.err(), Some(late));
     }
 
+    /// An Array result of the given kind, laid out by the given leaves in
+    /// the given planes.
+    fn result(kinds: Kinds, kind: KindRef, leaves: Vec<Leaf>, storage: Vec<Storage>) -> Unit {
+        let planes: Vec<u32> = (0..storage.len() as u32).collect();
+        Unit {
+            kinds,
+            outputs: vec![Port {
+                name: STATE,
+                kind,
+                shape: vec![cells(4)],
+                leaves,
+                planes: planes.iter().map(|slot| Slot(*slot)).collect(),
+            }],
+            stages: vec![stage(&planes, &[])],
+            storage,
+            ..Unit::default()
+        }
+    }
+
+    /// The same, for an Array of one fiber that needs no other kind.
+    fn result_of(element: Definition, leaves: Vec<Leaf>, storage: Vec<Storage>) -> Unit {
+        let mut kinds = Kinds::default();
+        let kind = array(&mut kinds, element);
+        result(kinds, kind, leaves, storage)
+    }
+
+    fn out(element_bytes: u32) -> Storage {
+        Storage::Output(need(element_bytes, vec![cells(4)]))
+    }
+
     #[test]
     fn a_fiber_array_may_be_one_plane_of_structs_or_one_plane_per_component() {
         // An Array of a fiber holding a Real and an Int.
-        let fiber = Fiber::Product(vec![
-            ("mass".to_string(), Fiber::Real),
-            ("id".to_string(), Fiber::Int),
-        ]);
-        let unit = |leaves, storage: Vec<Storage>| {
-            let planes: Vec<u32> = (0..storage.len() as u32).collect();
-            Unit {
-                outputs: vec![Port {
-                    name: STATE,
-                    kind: Kind::Array {
-                        element: fiber.clone(),
-                        axes: vec![AxisKind::Closed],
-                    },
-                    shape: vec![cells(4)],
-                    leaves,
-                    planes: planes.iter().map(|slot| Slot(*slot)).collect(),
-                }],
-                stages: vec![stage(&planes, &[])],
-                storage,
-                ..Unit::default()
-            }
+        let unit = |leaves, storage| {
+            let mut kinds = Kinds::default();
+            let real = kinds.define(Definition::Real);
+            let int = kinds.define(Definition::Int);
+            let members = vec![("mass".to_string(), real), ("id".to_string(), int)];
+            let kind = array(&mut kinds, Definition::Product(members));
+            result(kinds, kind, leaves, storage)
         };
-        let out = |element_bytes| Storage::Output(need(element_bytes, vec![cells(4)]));
 
         // One array of whole fibers: both leaves in one 16-byte element.
         let together = vec![leaf(Scalar::F64, 0, 0), leaf(Scalar::I32, 0, 8)];
@@ -692,62 +727,63 @@ mod tests {
     }
 
     #[test]
+    fn a_bool_is_stored_as_a_32_bit_integer() {
+        let stored = |scalar| result_of(Definition::Bool, vec![leaf(scalar, 0, 0)], vec![out(8)]);
+        assert!(stored(Scalar::I32).check().is_ok());
+        let mismatch = Some(Defect::KindMismatch(STATE));
+        assert_eq!(stored(Scalar::I64).check().err(), mismatch);
+        assert_eq!(stored(Scalar::F32).check().err(), mismatch);
+    }
+
+    #[test]
     fn an_optional_result_reports_presence_in_the_shape_record() {
         // The State of a program that starts absent: an Optional Array.
-        let unit = |kind, capacity| Unit {
-            outputs: vec![Port {
-                name: STATE,
-                kind,
-                shape: vec![
-                    ShapeEntry::Runtime(ShapeRef(0)),
-                    ShapeEntry::Runtime(ShapeRef(1)),
-                ],
-                leaves: vec![leaf(Scalar::F64, 0, 0)],
-                planes: vec![Slot(0)],
-            }],
-            storage: vec![Storage::Output(need(8, vec![capacity]))],
-            shape_fields: vec![ShapeField::Presence, ShapeField::Domain { rank: 1 }],
-            stages: vec![stage(&[], &[0, 1]), stage(&[0], &[])],
-            ..Unit::default()
+        let unit = |nest: bool, capacity| {
+            let mut kinds = Kinds::default();
+            let array = array(&mut kinds, Definition::Real);
+            let mut kind = kinds.define(Definition::Optional(array));
+            if nest {
+                kind = kinds.define(Definition::Optional(kind));
+            }
+            Unit {
+                kinds,
+                outputs: vec![Port {
+                    name: STATE,
+                    kind,
+                    shape: vec![
+                        ShapeEntry::Runtime(ShapeRef(0)),
+                        ShapeEntry::Runtime(ShapeRef(1)),
+                    ],
+                    leaves: vec![leaf(Scalar::F64, 0, 0)],
+                    planes: vec![Slot(0)],
+                }],
+                storage: vec![Storage::Output(need(8, vec![capacity]))],
+                shape_fields: vec![ShapeField::Presence, ShapeField::Domain { rank: 1 }],
+                stages: vec![stage(&[], &[0, 1]), stage(&[0], &[])],
+                ..Unit::default()
+            }
         };
-        let array = || Kind::Array {
-            element: Fiber::Real,
-            axes: vec![AxisKind::Closed],
-        };
-        let optional = || Kind::Optional(Box::new(array()));
-        assert!(unit(optional(), ShapeEntry::Runtime(ShapeRef(1)))
+        assert!(unit(false, ShapeEntry::Runtime(ShapeRef(1)))
             .check()
             .is_ok());
 
         // Presence is not a size, so it cannot state how much storage to provide.
-        let as_capacity = unit(optional(), ShapeEntry::Fixed(ShapeValue::Presence(true))).check();
+        let as_capacity = unit(false, ShapeEntry::Fixed(ShapeValue::Presence(true))).check();
         assert_eq!(as_capacity.err(), Some(Defect::CapacityNotASize(Slot(0))));
 
         // An Optional never directly holds an Optional.
-        let nested = unit(Kind::Optional(Box::new(optional())), cells(100)).check();
-        assert_eq!(nested.err(), Some(Defect::NestedOptional(STATE)));
+        let nested = unit(true, cells(100)).check();
+        let defect = KindDefect::NestedOptional { at: KindRef(3) };
+        assert_eq!(nested.err(), Some(Defect::Kind(defect)));
     }
 
     #[test]
     fn a_fiber_whose_storage_is_not_described_is_refused_as_unsupported() {
-        let unit = Unit {
-            outputs: vec![Port {
-                name: STATE,
-                kind: Kind::Array {
-                    element: Fiber::Mat {
-                        rows: 3,
-                        columns: 3,
-                    },
-                    axes: vec![AxisKind::Closed],
-                },
-                shape: vec![cells(4)],
-                leaves: Vec::new(),
-                planes: vec![Slot(0)],
-            }],
-            storage: vec![Storage::Output(need(72, vec![cells(4)]))],
-            stages: vec![stage(&[0], &[])],
-            ..Unit::default()
+        let matrix = Definition::Mat {
+            rows: 3,
+            columns: 3,
         };
+        let unit = result_of(matrix, Vec::new(), vec![out(72)]);
         assert_eq!(unit.check().err(), Some(Defect::KindUnsupported(STATE)));
     }
 }

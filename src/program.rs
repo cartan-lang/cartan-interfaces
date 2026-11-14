@@ -1,6 +1,6 @@
 //! What a program lets you name.
 
-use crate::kind::Kind;
+use crate::kind::{KindRef, Kinds};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StateId(pub u32);
@@ -36,7 +36,8 @@ pub enum Name {
 pub struct Declared {
     pub name: Name,
     pub label: String,
-    pub kind: Kind,
+    /// A reference into the program's table of kinds.
+    pub kind: KindRef,
 }
 
 /// Everything one analyzed source declares.
@@ -45,6 +46,8 @@ pub struct Declared {
 /// the labels only to resolve what a user asks for.
 #[derive(Clone, Debug, Default)]
 pub struct Program {
+    /// Every kind the declarations use, each stated once.
+    pub kinds: Kinds,
     pub declared: Vec<Declared>,
     /// Update blocks, in source order. Each execution of one is one atomic batch.
     pub updates: Vec<UpdateId>,
