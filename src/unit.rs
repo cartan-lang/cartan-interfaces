@@ -55,12 +55,14 @@ pub struct ShapeRef(pub u32);
 /// from the value's planes. An absent value has a presence and no storage,
 /// and a value that is kept keeps its sizes and presence with it.
 ///
-/// Sizes and presence follow the same rule as storage: each named one has
-/// one producer and any number of consumers. The sizes of an input come with
-/// the value bound to it. Any other is determined by one stage. A stage
-/// that uses it, storage whose capacity names it and a result that has it
-/// are its consumers. Several ports may refer to one size. That states once
-/// that the values have the same size.
+/// Sizes and presence are consumed the way storage is: only after they are
+/// produced. Unlike storage, which several stages may write in list order, a
+/// size or presence is fixed once produced, so each named one has one
+/// producer and any number of consumers. The sizes of an input come with the
+/// value bound to it. Any other is determined by one stage. A stage that
+/// uses it, storage whose capacity names it and a result that has it are its
+/// consumers. Several ports may refer to one size. That states once that the
+/// values have the same size.
 ///
 /// The runtime is a consumer too, but only where something it does needs the
 /// value: providing storage whose capacity names the size, verifying a
@@ -68,8 +70,13 @@ pub struct ShapeRef(pub u32);
 /// that only compiled code consumes need not be read by the runtime.
 ///
 /// A size that was never produced is different from a presence that says a
-/// value is absent. The sizes of an absent value are not produced, and
-/// storage provided for a result that turns out absent goes unused.
+/// value is absent. Producing and consuming apply only where a size applies.
+/// The sizes within an Optional that turns out absent are not produced, and
+/// a stage that uses them consumes nothing then: a stage that works out a
+/// length when present, and zero otherwise, uses the presence and, only when
+/// present, the length. Storage provided for a result that turns out absent
+/// goes unused. The check works from what the description declares, not from
+/// which sizes apply on a given run.
 ///
 /// In an input port, `Fixed` is a specialization: the value bound must have
 /// that size, and the runtime verifies it before any stage runs. A change of
@@ -77,8 +84,9 @@ pub struct ShapeRef(pub u32);
 /// Two inputs that refer to one size must agree in the same way. The runtime
 /// never treats two different sizes as one.
 ///
-/// Gap: how a size or presence is physically kept, in which memory, and how
-/// it reaches a stage or a later consumer, is not written.
+/// Gap: how a size or presence is physically kept, in which memory, how it
+/// reaches a stage or a later consumer, and how a stage is told that a size
+/// does not apply, is not written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeEntry {
     Fixed(ShapeValue),
@@ -263,7 +271,9 @@ pub struct Stage {
     pub reads: Vec<Slot>,
     /// Storage this stage writes.
     pub writes: Vec<Slot>,
-    /// Sizes and presence this stage consumes.
+    /// Sizes and presence this stage consumes. This declares a dependency.
+    /// It does not require the code to load the value, and it does not by
+    /// itself require the runtime to read it.
     pub uses: Vec<ShapeRef>,
     /// Sizes and presence this stage produces.
     pub determines: Vec<ShapeRef>,
