@@ -7,6 +7,18 @@ use crate::unit::{Checked, Code, Target};
 ///
 /// All three ask for the same kind of computation: read named values, produce
 /// named values. The request, not the unit, says what happens to the results.
+///
+/// Decide: these three name a use the runtime makes of the results as well
+/// as a choice of what to compute. The two could be separated: one way to
+/// select what is computed, with initializing, committing and observing left
+/// to the runtime. A State's name is its current value, so selecting by name
+/// alone cannot ask for its initial value or for an update's new value.
+///
+/// Gap: a unit that takes a binding as an input has it supplied by an
+/// `Observe` request, which is defined against a published State. A binding
+/// may be needed before anything is published, or for a State several
+/// unpublished updates on. Such a request must use the values its consumer
+/// captured.
 #[derive(Clone, Copy, Debug)]
 pub enum Request<'a> {
     /// The initial value of every State. Initial values are closed: they read
