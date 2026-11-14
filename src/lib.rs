@@ -4,8 +4,8 @@
 //! the others. Everything is plain description with no dependencies.
 //!
 //! The crate has two layers. The runtime-facing modules, `kind`, `layout`,
-//! `program`, `unit`, `supply` and `session`, are everything the runtime needs from a compiler
-//! and everything an application needs from the runtime. They import nothing
+//! `program`, `unit`, `supply` and `session`, are everything the runtime
+//! needs from a compiler and everything an application needs from the runtime. They import nothing
 //! from the other modules, so a compiler built from other components can
 //! implement [`supply::Supplier`] and be run by the same runtime. Building
 //! with `--no-default-features` compiles this layer alone.
@@ -18,6 +18,9 @@
 //! stages it runs. The runtime owns everything live. It binds inputs, provides
 //! storage, runs the stages and publishes results. Compiled code never
 //! allocates memory and never publishes.
+//!
+//! Every official term is listed in [`glossary`]. A term that is a type is
+//! defined in that type's documentation; the rest are defined there.
 //!
 //! Everything here is a draft. Doc paragraphs starting `Gap:` name parts of a
 //! contract that are not written yet; paragraphs starting `Decide:` name open
@@ -35,6 +38,9 @@ pub mod unit;
 pub mod supply;
 
 pub mod session;
+
+// Every official term, in one place.
+pub mod glossary;
 
 // The official compiler's pipeline, in order.
 #[cfg(feature = "pipeline")]

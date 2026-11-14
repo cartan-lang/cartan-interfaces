@@ -33,18 +33,24 @@ everything an application needs from a runtime:
   once in the same way, so a layout that repeats is written once.
 - `program` names what a source declares: States, Params, bindings and update
   blocks.
-- `unit` describes one piece of compiled code: its inputs and results, their
+- `unit` describes one piece of compiled code: its input and output ports, their
   kinds, shape and physical layout, the storage it needs and in which memory,
   and its stages. A stage is one launch of compiled code and the only
   execution boundary. A stage consumes only what was produced before it,
   shape values included, and each shape value has one producer. A shape value
   is a List length, an Array domain or an Optional's presence.
-- `supply` is what a compiler offers a runtime: units on request.
+- `supply` is what a compiler offers a runtime: a unit that meets the demands
+  made of it.
 - `session` is what an application asks of a runtime and what a runtime reports.
 
-These modules import nothing from the others. A compiler built from other
-components implements `Supplier` and is run by the same runtime.
-`cargo check --no-default-features` builds this layer alone.
+`glossary` lists every official term of both layers. A term that is a type is
+defined in that type's documentation and listed there by re-export. A term that
+cannot be a Rust item is defined there and nowhere else. The generated
+documentation of that module is the glossary.
+
+The runtime-facing modules import nothing from the pipeline modules. A compiler
+built from other components implements `Supplier` and is run by the same
+runtime. `cargo check --no-default-features` builds this layer alone.
 
 The pipeline modules are the contracts between the components of the official
 compiler, behind the default `pipeline` feature: `syntax`, `graph`, `codegen`

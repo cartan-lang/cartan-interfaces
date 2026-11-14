@@ -1,8 +1,8 @@
 //! The description of one piece of compiled code.
 
 use crate::kind::{Definition, KindDefect, KindRef, Kinds, ShapeField};
-use crate::layout::{Layout, LayoutDefect, LayoutRef, Layouts, Measures};
-use crate::program::Root;
+use crate::layout::{Layout, LayoutDefect, LayoutRef, Layouts, Measures, Plane};
+use crate::program::{Demand, Node};
 
 /// One axis of an Array domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,35 +121,52 @@ pub enum Memory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot(pub u32);
 
+/// How many elements a slot must be able to hold: the product of the counts
+/// of these shape values. Empty means one element. Each is a length or a
+/// domain, since presence counts nothing.
+///
+/// What the code writes must fit. That is an obligation on the code. The
+/// check cannot establish it, and the runtime is not required to read a
+/// shape value in order to verify it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Capacity(pub Vec<ShapeEntry>);
+
 /// What storage a slot needs: which memory, the bytes of one element, which
-/// are fixed at compile time, and how many elements, which is a count given
-/// by shape values.
+/// are fixed at compile time, and how many elements.
 ///
 /// A unit never states the bytes of an allocation, and it never asks for
-/// storage at all: this description is the request. The runtime provides the
-/// storage before the stage that first writes it. That makes the runtime a
-/// consumer of every shape value the capacity names, and of no others.
-///
-/// What the code writes must fit the stated capacity. That is an obligation
-/// on the code. The check cannot establish it, and the runtime is not
-/// required to read a shape value in order to verify it.
-///
-/// The storage a slot is given may be a region of a larger allocation. The
-/// runtime passes it as a base and an offset from that base, and a whole
-/// allocation is the case where the offset is zero. The region starts where
-/// `align` allows and holds the stated capacity. Code may not assume that a
-/// slot begins an allocation or that two slots lie in different ones, and it
-/// reads and writes nothing outside the regions it was given. The regions of
-/// different slots do not overlap, except where one slot is an alias.
+/// storage at all: this description is the request. The runtime provides a
+/// [`Region`] before the stage that first writes the slot. That makes the
+/// runtime a consumer of every shape value the capacity names, and of no
+/// others.
 #[derive(Clone, Debug)]
 pub struct Need {
     pub memory: Memory,
+    /// The bytes of one element.
     pub element_bytes: u32,
+    /// The alignment the start of the storage must have, in bytes.
     pub align: u32,
-    /// How many elements the slot must be able to hold: the product of these.
-    /// Empty means one element. Each is a length or a domain, and each is
-    /// produced before the stage that first writes the slot.
-    pub capacity: Vec<ShapeEntry>,
+    /// Every shape value here is produced before the stage that first writes
+    /// the slot.
+    pub capacity: Capacity,
+}
+
+/// The storage a slot is given at run time: part or all of an allocation,
+/// passed to a stage as a base and an offset from that base. A whole
+/// allocation is the case where the offset is zero.
+///
+/// The region starts where the slot's alignment allows and holds the stated
+/// capacity. Code may not assume that a slot begins an allocation or that
+/// two slots lie in different ones, and it reads and writes nothing outside
+/// the regions it was given. The regions of different slots do not overlap,
+/// except where one slot is an alias.
+///
+/// Gap: what a base is differs by target and is not written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Region<Base> {
+    pub base: Base,
+    /// Bytes from the base to the start of the region.
+    pub offset: u64,
 }
 
 /// What each slot is for. This decides who may write it.
@@ -167,20 +184,20 @@ pub enum Storage {
     Scratch(Need),
 }
 
-/// One value entering or leaving a unit: its kind, its layout, its shape and
-/// the storage that holds it. The kind says what the value is and the layout
-/// says how it is kept. The layout must lay out that kind, and the port gives
-/// one shape value for each run-time fact of the kind and one slot for each
-/// plane of the layout.
+/// One value a unit takes in: the value of a node, with its kind, its
+/// layout, its shape and the storage that holds it.
+///
+/// The kind says what the value is and the layout says how it is kept. The
+/// layout must lay out that kind, and the port gives one shape value for each
+/// run-time fact of the kind and one slot for each plane of the layout.
 ///
 /// Decide: a value is bound to a port only if their layouts are identical.
 /// Converting between layouts would be an explicit computation, never
 /// something the runtime does silently while binding.
 #[derive(Clone, Debug)]
-pub struct Port {
-    /// What this port carries. An input is always the value of a node; a
-    /// result answers one root the unit was asked for.
-    pub root: Root,
+pub struct InputPort {
+    /// The node whose value this is.
+    pub node: Node,
     /// A reference into the unit's table of kinds.
     pub kind: KindRef,
     /// A reference into the unit's table of layouts.
@@ -189,6 +206,18 @@ pub struct Port {
     pub shape: Vec<ShapeEntry>,
     /// The slots that hold the value, one for each plane of the layout. No
     /// two planes of one value share storage.
+    pub planes: Vec<Slot>,
+}
+
+/// One value a unit computes: the result that meets one demand. Its kind,
+/// layout, shape and planes are stated as for an [`InputPort`].
+#[derive(Clone, Debug)]
+pub struct OutputPort {
+    /// The demand this result meets.
+    pub demand: Demand,
+    pub kind: KindRef,
+    pub layout: LayoutRef,
+    pub shape: Vec<ShapeEntry>,
     pub planes: Vec<Slot>,
 }
 
@@ -215,8 +244,8 @@ pub struct Port {
 /// is not designed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
-    /// What this result answers.
-    pub root: Root,
+    /// The demand this result meets.
+    pub demand: Demand,
     /// A reference into the unit's table of kinds.
     pub kind: KindRef,
     /// Which input is chosen: always, or when it is present.
@@ -267,7 +296,7 @@ pub struct Selection {
 /// needs nothing from the runtime while it runs. Where repetition happens is
 /// not part of this contract.
 ///
-/// Each slot is passed to a stage as a base and an offset.
+/// Each slot is passed to a stage as a [`Region`].
 ///
 /// Gap: nothing says where a stage runs. The code is emitted for one target,
 /// so a stage whose inputs are all available on the host cannot be placed
@@ -297,7 +326,7 @@ pub struct Stage {
 ///
 /// A unit is a description, not an execution boundary. It is the scope in
 /// which storage, shape values, kinds and layouts are stated once, and it
-/// says which results answer which roots. Its stages are what runs. One rule
+/// says which results meet which demands. Its stages are what runs. One rule
 /// holds inside a unit and between units: whatever is consumed was produced
 /// first, by a stage or by whatever produced the value bound to an input.
 ///
@@ -327,9 +356,9 @@ pub struct Unit {
     pub kinds: Kinds,
     /// Every layout the ports use, each stated once.
     pub layouts: Layouts,
-    pub inputs: Vec<Port>,
+    pub inputs: Vec<InputPort>,
     /// Results the unit computes.
-    pub outputs: Vec<Port>,
+    pub outputs: Vec<OutputPort>,
     /// Results that are inputs, unchanged.
     pub selected: Vec<Selection>,
     pub storage: Vec<Storage>,
@@ -414,8 +443,6 @@ pub enum Defect {
     /// kind, it gives the wrong number of shape values or of slots, or a
     /// shape value is of the wrong sort.
     KindMismatch(PortRef),
-    /// An input port is not the value of a node.
-    InputNotAValue(PortRef),
     /// A selection names an input the unit does not have.
     UnknownInput(PortRef),
     /// A storage capacity is stated as presence, which counts nothing.
@@ -423,20 +450,20 @@ pub enum Defect {
     /// Two planes of one value are given the same storage.
     PlaneRepeated {
         port: PortRef,
-        plane: u32,
+        plane: Plane,
     },
     /// A plane's layout spans more bytes than one element of its storage
     /// holds.
     OutsideElement {
         port: PortRef,
-        plane: u32,
+        plane: Plane,
     },
     /// Parts of a value with different shape values are placed in one
     /// plane. A plane holds one run of elements, so everything in it shares
     /// one domain and one presence.
     PlaneSharedAcrossParts {
         port: PortRef,
-        plane: u32,
+        plane: Plane,
     },
 }
 
@@ -475,6 +502,84 @@ impl Checked {
     pub fn unit(&self) -> &Unit {
         &self.0
     }
+
+    /// What produces a shape value, or nothing if the description gives it
+    /// no producer. A checked unit never gives one two.
+    pub fn producer(&self, shape: ShapeRef) -> Option<Producer> {
+        let named = ShapeEntry::Runtime(shape);
+        let brings = |input: &InputPort| input.shape.contains(&named);
+        let determines = |stage: &Stage| stage.determines.contains(&shape);
+        let input = self.0.inputs.iter().position(brings);
+        let stage = self.0.stages.iter().position(determines);
+        let input = input.map(|input| Producer::Input(input as u32));
+        input.or(stage.map(|stage| Producer::Stage(stage as u32)))
+    }
+
+    /// Everything the description says depends on a shape value.
+    pub fn consumers(&self, shape: ShapeRef) -> Vec<Consumer> {
+        let unit = &self.0;
+        let named = ShapeEntry::Runtime(shape);
+        let mut consumers = Vec::new();
+        for (index, stage) in unit.stages.iter().enumerate() {
+            if stage.uses.contains(&shape) {
+                consumers.push(Consumer::Stage(index as u32));
+            }
+        }
+        for (index, storage) in unit.storage.iter().enumerate() {
+            if let Storage::Output(need) | Storage::Scratch(need) = storage {
+                if need.capacity.0.contains(&named) {
+                    consumers.push(Consumer::Capacity(Slot(index as u32)));
+                }
+            }
+        }
+        for (index, output) in unit.outputs.iter().enumerate() {
+            if output.shape.contains(&named) {
+                consumers.push(Consumer::Result(index as u32));
+            }
+        }
+        for (index, selection) in unit.selected.iter().enumerate() {
+            // An Optional's presence is the first of its shape values.
+            let first = &unit.inputs[selection.first as usize];
+            if selection.otherwise.is_some() && first.shape.first() == Some(&named) {
+                consumers.push(Consumer::Selection(index as u32));
+            }
+        }
+        consumers
+    }
+}
+
+/// What fixes a shape value. Each shape value has exactly one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Producer {
+    /// It comes with the value bound to this input. Where several inputs
+    /// refer to one shape value, this is the first of them.
+    Input(u32),
+    /// This stage determines it.
+    Stage(u32),
+}
+
+/// Something that depends on a shape value. A shape value may have any
+/// number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Consumer {
+    /// This stage uses it.
+    Stage(u32),
+    /// The capacity of this storage names it, so the runtime consumes it to
+    /// provide the storage.
+    Capacity(Slot),
+    /// This computed result has it.
+    Result(u32),
+    /// The runtime chooses this selection by it.
+    Selection(u32),
+}
+
+/// What an input port and an output port state alike.
+struct Stated<'a> {
+    at: PortRef,
+    kind: KindRef,
+    layout: LayoutRef,
+    shape: &'a [ShapeEntry],
+    planes: &'a [Slot],
 }
 
 /// Which shape values govern each plane of one port.
@@ -526,7 +631,7 @@ impl Governed<'_> {
             Some(Layout::Group(parts)) if facts > 0 => {
                 let mut next = fact;
                 for part in parts {
-                    self.walk(part.layout, plane + part.plane, next, enclosing, absent)?;
+                    self.walk(part.layout, plane + part.plane.0, next, enclosing, absent)?;
                     next += self.measures.facts[part.layout.0 as usize] as usize;
                 }
             }
@@ -584,7 +689,7 @@ impl Unit {
         for (index, entry) in self.storage.iter().enumerate() {
             match entry {
                 Storage::Input(need) | Storage::Output(need) | Storage::Scratch(need) => {
-                    for entry in &need.capacity {
+                    for entry in &need.capacity.0 {
                         exists(entry)?;
                         let presence = match entry {
                             ShapeEntry::Fixed(value) => matches!(value, ShapeValue::Presence(_)),
@@ -620,16 +725,23 @@ impl Unit {
         let mut governs: Vec<Vec<ShapeRef>> = vec![Vec::new(); self.storage.len()];
         let mut owed: Vec<ShapeRef> = Vec::new();
 
-        let inputs = self.inputs.iter().enumerate();
-        let outputs = self.outputs.iter().enumerate();
-        let ports = inputs
-            .map(|(index, port)| (PortRef::Input(index as u32), port))
-            .chain(outputs.map(|(index, port)| (PortRef::Output(index as u32), port)));
-        for (at, port) in ports {
+        let inputs = self.inputs.iter().enumerate().map(|(index, port)| Stated {
+            at: PortRef::Input(index as u32),
+            kind: port.kind,
+            layout: port.layout,
+            shape: &port.shape,
+            planes: &port.planes,
+        });
+        let outputs = self.outputs.iter().enumerate().map(|(index, port)| Stated {
+            at: PortRef::Output(index as u32),
+            kind: port.kind,
+            layout: port.layout,
+            shape: &port.shape,
+            planes: &port.planes,
+        });
+        for port in inputs.chain(outputs) {
+            let at = port.at;
             let input = matches!(at, PortRef::Input(_));
-            if input && !matches!(port.root, Root::Value(_)) {
-                return Err(Defect::InputNotAValue(at));
-            }
 
             // The port's layout lays out its kind, and it gives one entry
             // for each fact and one slot for each plane.
@@ -652,7 +764,7 @@ impl Unit {
             {
                 return Err(mismatch);
             }
-            for (field, entry) in self.kinds.shape_fields(port.kind).iter().zip(&port.shape) {
+            for (field, entry) in self.kinds.shape_fields(port.kind).iter().zip(port.shape) {
                 exists(entry)?;
                 let fits = match entry {
                     ShapeEntry::Fixed(value) => value.is(*field),
@@ -688,11 +800,17 @@ impl Unit {
                 };
                 let plane = plane as u32;
                 if used.contains(&backing) {
-                    return Err(Defect::PlaneRepeated { port: at, plane });
+                    return Err(Defect::PlaneRepeated {
+                        port: at,
+                        plane: Plane(plane),
+                    });
                 }
                 used.push(backing);
                 if measures.spans[layout][plane as usize].1 > need.element_bytes {
-                    return Err(Defect::OutsideElement { port: at, plane });
+                    return Err(Defect::OutsideElement {
+                        port: at,
+                        plane: Plane(plane),
+                    });
                 }
             }
 
@@ -707,7 +825,10 @@ impl Unit {
             };
             governed
                 .walk(port.layout, 0, 0, &mut Vec::new(), false)
-                .map_err(|plane| Defect::PlaneSharedAcrossParts { port: at, plane })?;
+                .map_err(|plane| Defect::PlaneSharedAcrossParts {
+                    port: at,
+                    plane: Plane(plane),
+                })?;
             let runtime = |fact: usize| match &port.shape[fact] {
                 ShapeEntry::Runtime(field) => Some(*field),
                 ShapeEntry::Fixed(_) => None,
@@ -793,7 +914,7 @@ impl Unit {
                 };
                 // Providing the storage consumes what its capacity names.
                 if !std::mem::replace(&mut provided[slot.0 as usize], true) {
-                    for entry in &need.capacity {
+                    for entry in &need.capacity.0 {
                         match entry {
                             ShapeEntry::Runtime(field) if !produced[field.0 as usize] => {
                                 return Err(late(*field));
@@ -830,9 +951,10 @@ mod tests {
     use super::*;
     use crate::kind::AxisKind;
     use crate::layout::{Part, Scalar};
-    use crate::program::{Node, StateId};
+    use crate::program::StateId;
 
-    const STATE: Root = Root::Value(Node::State(StateId(0)));
+    const NODE: Node = Node::State(StateId(0));
+    const STATE: Demand = Demand::Value(NODE);
     const RESULT: PortRef = PortRef::Output(0);
 
     fn need(element_bytes: u32, capacity: Vec<ShapeEntry>) -> Need {
@@ -840,7 +962,7 @@ mod tests {
             memory: Memory::Device(0),
             element_bytes,
             align: 8,
-            capacity,
+            capacity: Capacity(capacity),
         }
     }
 
@@ -874,13 +996,39 @@ mod tests {
     fn part(layout: LayoutRef, plane: u32, offset: u32) -> Part {
         Part {
             layout,
-            plane,
+            plane: Plane(plane),
             offset,
         }
     }
 
     fn slots(count: usize) -> Vec<Slot> {
         (0..count as u32).map(Slot).collect()
+    }
+
+    type Parts = (KindRef, LayoutRef, Vec<ShapeEntry>, Vec<Slot>);
+
+    impl From<Parts> for InputPort {
+        fn from((kind, layout, shape, planes): Parts) -> Self {
+            InputPort {
+                node: NODE,
+                kind,
+                layout,
+                shape,
+                planes,
+            }
+        }
+    }
+
+    impl From<Parts> for OutputPort {
+        fn from((kind, layout, shape, planes): Parts) -> Self {
+            OutputPort {
+                demand: STATE,
+                kind,
+                layout,
+                shape,
+                planes,
+            }
+        }
     }
 
     /// A unit under construction: its tables, and helpers that add to them.
@@ -906,20 +1054,16 @@ mod tests {
             self.array(Definition::Real, Scalar::F64)
         }
 
-        fn port(
+        /// A port for the State, as an input or an output.
+        fn port<P: From<Parts>>(
             &self,
             kind: KindRef,
             layout: LayoutRef,
             shape: Vec<ShapeEntry>,
             planes: &[u32],
-        ) -> Port {
-            Port {
-                root: STATE,
-                kind,
-                layout,
-                shape,
-                planes: planes.iter().map(|slot| Slot(*slot)).collect(),
-            }
+        ) -> P {
+            let planes = planes.iter().map(|slot| Slot(*slot)).collect();
+            P::from((kind, layout, shape, planes))
         }
 
         fn unit(self) -> Unit {
@@ -960,22 +1104,6 @@ mod tests {
             stage: 0,
             slot: Slot(0),
         };
-        assert_eq!(unit.check().err(), Some(defect));
-    }
-
-    #[test]
-    fn an_input_is_the_value_of_a_node() {
-        // A unit may be asked for a State's initial value, but cannot take one in.
-        let mut tables = Tables::default();
-        let (kind, layout) = tables.reals();
-        let mut port = tables.port(kind, layout, vec![cells(4)], &[0]);
-        port.root = Root::Initial(StateId(0));
-        let unit = Unit {
-            inputs: vec![port],
-            storage: vec![Storage::Input(need(8, vec![cells(4)]))],
-            ..tables.unit()
-        };
-        let defect = Defect::InputNotAValue(PortRef::Input(0));
         assert_eq!(unit.check().err(), Some(defect));
     }
 
@@ -1097,7 +1225,7 @@ mod tests {
         // Twelve bytes of fiber in an eight-byte element.
         let outside = Defect::OutsideElement {
             port: RESULT,
-            plane: 0,
+            plane: Plane(0),
         };
         assert_eq!(
             particles(together, vec![out(8)]).check().err(),
@@ -1120,7 +1248,7 @@ mod tests {
         unit.outputs[0].planes = vec![Slot(0), Slot(0)];
         let repeated = Defect::PlaneRepeated {
             port: RESULT,
-            plane: 1,
+            plane: Plane(1),
         };
         assert_eq!(unit.check().err(), Some(repeated));
     }
@@ -1221,7 +1349,7 @@ mod tests {
         ];
         let layout = tables.layouts.define(Layout::Group(parts));
         let count = second.0 as usize + 1;
-        let port = Port {
+        let port = OutputPort {
             planes: slots(count),
             ..tables.port(kind, layout, vec![cells(4), at(0)], &[])
         };
@@ -1256,7 +1384,7 @@ mod tests {
         // elements of one plane.
         let shared = Defect::PlaneSharedAcrossParts {
             port: RESULT,
-            plane: 0,
+            plane: Plane(0),
         };
         assert_eq!(pair(Vec::new(), (0, 8)).check().err(), Some(shared));
     }
@@ -1363,7 +1491,7 @@ mod tests {
     #[test]
     fn a_result_may_be_an_optional_input_or_a_fallback_without_a_copy() {
         let choose = |kind, first, otherwise| Selection {
-            root: STATE,
+            demand: STATE,
             kind,
             first,
             otherwise,
@@ -1427,10 +1555,21 @@ mod tests {
             }
         };
         // Storage for exactly the count: providing it consumes the count.
-        assert!(filter(at(1)).check().is_ok());
+        let (input, count) = (ShapeRef(0), ShapeRef(1));
+        let exact = filter(at(1)).check().unwrap();
+        assert_eq!(exact.producer(input), Some(Producer::Input(0)));
+        assert_eq!(exact.producer(count), Some(Producer::Stage(0)));
+        let stored = Consumer::Capacity(Slot(1));
+        let consumers = [Consumer::Stage(1), stored, Consumer::Result(0)];
+        assert_eq!(exact.consumers(count), consumers);
+
         // Storage for as many as the input holds: providing it consumes
         // nothing the code computed. The check does not show that the result
         // fits; that is the code's obligation.
-        assert!(filter(at(0)).check().is_ok());
+        let bounded = filter(at(0)).check().unwrap();
+        assert_eq!(
+            bounded.consumers(count),
+            [Consumer::Stage(1), Consumer::Result(0)]
+        );
     }
 }

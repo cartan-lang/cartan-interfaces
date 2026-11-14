@@ -60,10 +60,8 @@ pub trait Session {
 
     /// Complete this many updates and report the version reached.
     ///
-    /// A handshake is the blocking round trip in which the runtime waits for
-    /// one update to finish and accepts it before it starts the next. Asking
-    /// for several updates at once is what lets a runtime avoid a handshake
-    /// on every update.
+    /// Asking for several updates at once is what lets a runtime avoid a
+    /// [handshake](crate::glossary#handshake) on every update.
     fn advance(&mut self, updates: u64) -> Result<Version, Stop>;
 
     fn observe(&mut self, nodes: &[Node]) -> Result<Vec<(Node, Self::Value)>, Stop>;

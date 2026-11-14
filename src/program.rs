@@ -31,7 +31,7 @@ pub struct UpdateId(pub u32);
 /// source never names is a node like any other.
 ///
 /// A node is the same everywhere it appears: in a unit's ports, in what the
-/// runtime holds and in what is selected. Port order and type numbering are
+/// runtime holds and in what is demanded. Port order and type numbering are
 /// never identity. A node does not identify one value: it has a value at
 /// each version and in each run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -59,11 +59,10 @@ pub struct Declared {
 /// One thing a supplier can be asked to compute.
 ///
 /// A State stands for the value it has now. Its initial value, and the value
-/// an update gives it, are different computations, so each has its own way
-/// to be selected. What is selected says nothing about what is done with the
-/// result.
+/// an update gives it, are different computations, so each has its own form
+/// of demand. A demand says nothing about what is done with the result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Root {
+pub enum Demand {
     /// The value a node has: a derived value, a Param, or a State as it
     /// stands.
     Value(Node),

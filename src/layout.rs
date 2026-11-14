@@ -58,6 +58,12 @@ impl Scalar {
     }
 }
 
+/// One plane of a layout, by its number: a run of equal elements. A layout
+/// numbers the planes it uses from zero, and whoever holds a value laid out
+/// that way supplies a piece of storage for each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Plane(pub u32);
+
 /// A reference to one layout: its place in a table of layouts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LayoutRef(pub u32);
@@ -68,7 +74,7 @@ pub struct LayoutRef(pub u32);
 pub struct Part {
     pub layout: LayoutRef,
     /// The part's plane zero is this plane of the group.
-    pub plane: u32,
+    pub plane: Plane,
     /// The part's byte zero is this byte of an element.
     pub offset: u32,
 }
@@ -263,7 +269,7 @@ impl Layouts {
             let place = part.layout.0 as usize;
             facts = facts.checked_add(measures.facts[place]).ok_or(too_large)?;
             for (plane, (start, end)) in measures.spans[place].iter().enumerate() {
-                let plane = part.plane.checked_add(plane as u32).ok_or(too_large)?;
+                let plane = part.plane.0.checked_add(plane as u32).ok_or(too_large)?;
                 let start = start.checked_add(part.offset).ok_or(too_large)?;
                 let end = end.checked_add(part.offset).ok_or(too_large)?;
                 if plane >= most_planes {
@@ -457,7 +463,7 @@ mod tests {
     fn part(layout: LayoutRef, plane: u32, offset: u32) -> Part {
         Part {
             layout,
-            plane,
+            plane: Plane(plane),
             offset,
         }
     }

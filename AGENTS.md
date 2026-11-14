@@ -32,9 +32,14 @@ standalone clone, the essentials are:
 - Own the contracts between Cartan components: plain types and trait
   signatures, one module per component's side. The only logic is checking that
   a description is well formed. The crate has no dependencies.
-- Keep the two layers. The runtime-facing modules (`kind`, `layout`, `program`, `unit`, `supply`,
-  `session`) import nothing from the pipeline modules (`syntax`, `graph`,
-  `codegen`, `compile`), which sit behind the default `pipeline` feature.
+- Keep the two layers. The runtime-facing modules (`kind`, `layout`,
+  `program`, `unit`, `supply`, `session`) import nothing from the pipeline
+  modules (`syntax`, `graph`, `codegen`, `compile`), which sit behind the
+  default `pipeline` feature.
+- Keep one vocabulary. `glossary` lists every official term. Make a term a
+  type wherever it can be one, and define it once, in that type's
+  documentation. A term that cannot be a Rust item is defined in `glossary`
+  and nowhere else. Add a word there before using it in a contract.
 - A change here is an agreement between the components on both sides of a
   boundary. Agree it with their owners before committing, and with the
   workspace owner for the runtime-facing layer.
@@ -60,5 +65,7 @@ Run before every commit:
 cargo fmt --check
 cargo test --locked
 cargo check --no-default-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features
 python3 tools/docs.py check --strict
 ```

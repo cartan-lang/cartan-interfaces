@@ -1,6 +1,6 @@
 //! Source meaning: names, types, dependencies and the normalized computation.
 
-use crate::program::{DerivedId, Program, Root};
+use crate::program::{Demand, DerivedId, Program};
 use crate::syntax::SyntaxTree;
 
 /// A resolved, typed program. Documents and libraries are supplied by the
@@ -74,9 +74,9 @@ pub struct Plan {
 
 /// A normalized computation under one fusion plan.
 ///
-/// The same type whether the request is a launch, an update or an observation
-/// made later. One pipeline serves all three; the request selects roots and
-/// does not select a different compiler.
+/// The same type whether the request is the start of a run, an update or an
+/// observation made later. One pipeline serves all three; the request states
+/// demands and does not select a different compiler.
 ///
 /// An indexed computation supplies values at requested sites. Every indexed
 /// value in it is a domain and a rule for the value at each site, with the
@@ -157,6 +157,6 @@ pub trait Analyze {
     fn plans(
         &self,
         analysis: &Analysis,
-        roots: &[Root],
+        demands: &[Demand],
     ) -> Result<Self::Navigator, Self::Diagnostic>;
 }
