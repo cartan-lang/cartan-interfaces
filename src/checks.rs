@@ -792,8 +792,18 @@ impl Governed<'_> {
 }
 
 impl Unit {
-    /// Check that the description is well formed.
-    pub fn check(self) -> Result<Checked, Defect> {
+    /// Check that the description is well formed and can be carried.
+    pub fn check(self) -> Result<Checked, Refusal> {
+        match self.well_formed() {
+            Ok(Ok(checked)) => Ok(checked),
+            Ok(Err(unsupported)) => Err(Refusal::Unsupported(unsupported)),
+            Err(defect) => Err(Refusal::Defect(defect)),
+        }
+    }
+
+    /// A defect if one is found. Otherwise the checked description, or the
+    /// first port that cannot be carried.
+    fn well_formed(self) -> Result<Result<Checked, Unsupported>, Defect> {
         let storage = |slot: Slot| {
             self.storage
                 .get(slot.0 as usize)
@@ -868,7 +878,7 @@ impl Unit {
             let layout = port.layout.0 as usize;
             match scalars.get(kind) {
                 None => return Err(Defect::UnknownKind(at)),
-                Some(None) => return Err(Defect::KindUnsupported(at)),
+                Some(None) => return Ok(Err(Unsupported { port: at })),
                 Some(Some(_)) => {}
             }
             if layout >= self.layouts.definitions.len() {
@@ -1060,10 +1070,10 @@ impl Unit {
         }
         match owed.into_iter().find(|field| !produced[field.0 as usize]) {
             Some(field) => Err(Defect::ResultShapeUnknown(field)),
-            None => Ok(Checked {
+            None => Ok(Ok(Checked {
                 unit: self,
                 governs,
-            }),
+            })),
         }
     }
 }

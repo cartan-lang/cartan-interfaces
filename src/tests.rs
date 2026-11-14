@@ -366,6 +366,20 @@ mod layout {
 mod unit {
     use crate::*;
 
+    /// The defect a check found, if it found one.
+    trait Outcome {
+        fn defect(self) -> Option<Defect>;
+    }
+
+    impl Outcome for Result<Checked, Refusal> {
+        fn defect(self) -> Option<Defect> {
+            match self {
+                Err(Refusal::Defect(defect)) => Some(defect),
+                _ => None,
+            }
+        }
+    }
+
     const NODE: Node = Node::State(StateId(0));
     const STATE: Demand = Demand::Value(NODE);
     const RESULT: PortRef = PortRef::Output(0);
@@ -517,7 +531,7 @@ mod unit {
             stage: 0,
             slot: Slot(0),
         };
-        assert_eq!(unit.check().err(), Some(defect));
+        assert_eq!(unit.check().defect(), Some(defect));
     }
 
     #[test]
@@ -528,10 +542,10 @@ mod unit {
         };
         // Nothing produces the domain.
         let never = one_result(at(0), at(0), vec![stage(&[0], &[0], &[])]);
-        assert_eq!(never.check().err(), Some(late));
+        assert_eq!(never.check().defect(), Some(late));
         // A stage cannot produce the capacity of storage it is writing.
         let same = one_result(at(0), at(0), vec![stage(&[0], &[0], &[0])]);
-        assert_eq!(same.check().err(), Some(late));
+        assert_eq!(same.check().defect(), Some(late));
         // One stage determines the domain and the next fills.
         let stages = vec![stage(&[], &[], &[0]), stage(&[0], &[0], &[])];
         assert!(one_result(at(0), at(0), stages).check().is_ok());
@@ -540,14 +554,14 @@ mod unit {
         // result uses its domain, so it cannot also determine it, whatever
         // storage it was given.
         let own = one_result(at(0), cells(100), vec![stage(&[0], &[0], &[0])]);
-        assert_eq!(own.check().err(), Some(late));
+        assert_eq!(own.check().defect(), Some(late));
         // Nor may it leave the domain out of what it uses.
         let unused = Defect::GoverningShapeUnused {
             stage: 0,
             field: ShapeRef(0),
         };
         let blind = one_result(at(0), cells(100), vec![stage(&[0], &[], &[0])]);
-        assert_eq!(blind.check().err(), Some(unused));
+        assert_eq!(blind.check().defect(), Some(unused));
     }
 
     #[test]
@@ -581,11 +595,11 @@ mod unit {
         // A stage may not determine a shape value an input brings.
         let twice = Some(Defect::ShapeProducedTwice(ShapeRef(0)));
         let again = vec![stage(&[], &[], &[0]), stage(&[1, 2], &[0], &[])];
-        assert_eq!(shared(again).check().err(), twice);
+        assert_eq!(shared(again).check().defect(), twice);
         // Nor may two stages determine one shape value.
         let twice = Some(Defect::ShapeProducedTwice(ShapeRef(1)));
         let both = vec![stage(&[], &[], &[1]), stage(&[], &[], &[1])];
-        assert_eq!(shared(both).check().err(), twice);
+        assert_eq!(shared(both).check().defect(), twice);
     }
 
     /// A unit whose only result is an Array of a Real and an Int, laid out by
@@ -632,7 +646,7 @@ mod unit {
         // The Int placed on top of the Real.
         let clash = vec![(Scalar::F64, 0, 0), (Scalar::I32, 0, 4)];
         assert!(matches!(
-            particles(clash, vec![out(16)]).check().err(),
+            particles(clash, vec![out(16)]).check().defect(),
             Some(Defect::Layout(LayoutDefect::PartsOverlap { .. }))
         ));
         // Twelve bytes of fiber in an eight-byte element.
@@ -641,17 +655,17 @@ mod unit {
             plane: Plane(0),
         };
         assert_eq!(
-            particles(together, vec![out(8)]).check().err(),
+            particles(together, vec![out(8)]).check().defect(),
             Some(outside)
         );
         // A Real stored as an integer.
         let mismatch = Some(Defect::KindMismatch(RESULT));
         let wrong = vec![(Scalar::I64, 0, 0), (Scalar::I32, 0, 8)];
-        assert_eq!(particles(wrong, vec![out(16)]).check().err(), mismatch);
+        assert_eq!(particles(wrong, vec![out(16)]).check().defect(), mismatch);
         // Two planes laid out and one slot given.
         let mut short = particles(apart, vec![out(8), out(4)]);
         short.outputs[0].planes.pop();
-        assert_eq!(short.check().err(), mismatch);
+        assert_eq!(short.check().defect(), mismatch);
     }
 
     #[test]
@@ -663,7 +677,7 @@ mod unit {
             port: RESULT,
             plane: Plane(1),
         };
-        assert_eq!(unit.check().err(), Some(repeated));
+        assert_eq!(unit.check().defect(), Some(repeated));
     }
 
     #[test]
@@ -681,8 +695,8 @@ mod unit {
         };
         assert!(stored(Scalar::I32).check().is_ok());
         let mismatch = Some(Defect::KindMismatch(RESULT));
-        assert_eq!(stored(Scalar::I64).check().err(), mismatch);
-        assert_eq!(stored(Scalar::F32).check().err(), mismatch);
+        assert_eq!(stored(Scalar::I64).check().defect(), mismatch);
+        assert_eq!(stored(Scalar::F32).check().defect(), mismatch);
     }
 
     /// A unit whose only result is an Optional Array of Reals: presence in
@@ -719,12 +733,15 @@ mod unit {
         // Presence counts nothing, so it cannot state how much storage to provide.
         let presence = ShapeEntry::Fixed(ShapeValue::Presence(true));
         let unit = optional(false, vec![at(0), at(1)], presence, measure_then_fill());
-        assert_eq!(unit.check().err(), Some(Defect::CapacityNotACount(Slot(0))));
+        assert_eq!(
+            unit.check().defect(),
+            Some(Defect::CapacityNotACount(Slot(0)))
+        );
 
         // An Optional never directly holds an Optional.
         let unit = optional(true, vec![at(0), at(1)], cells(100), measure_then_fill());
         let defect = KindDefect::NestedOptional { at: KindRef(3) };
-        assert_eq!(unit.check().err(), Some(Defect::Kind(defect)));
+        assert_eq!(unit.check().defect(), Some(Defect::Kind(defect)));
     }
 
     #[test]
@@ -742,7 +759,7 @@ mod unit {
             vec![stage(&[], &[], &[0])],
         );
         assert_eq!(
-            unit.check().err(),
+            unit.check().defect(),
             Some(Defect::ResultShapeUnknown(ShapeRef(1)))
         );
     }
@@ -794,7 +811,7 @@ mod unit {
             stage: 0,
             field: ShapeRef(0),
         };
-        assert_eq!(pair(early, (1, 0)).check().err(), Some(late));
+        assert_eq!(pair(early, (1, 0)).check().defect(), Some(late));
 
         // Two Arrays with different domains cannot be kept side by side in the
         // elements of one plane.
@@ -802,7 +819,7 @@ mod unit {
             port: RESULT,
             plane: Plane(0),
         };
-        assert_eq!(pair(Vec::new(), (0, 8)).check().err(), Some(shared));
+        assert_eq!(pair(Vec::new(), (0, 8)).check().defect(), Some(shared));
     }
 
     #[test]
@@ -824,7 +841,7 @@ mod unit {
             stage: 0,
             field: ShapeRef(0),
         };
-        assert_eq!(unit.check().err(), Some(defect));
+        assert_eq!(unit.check().defect(), Some(defect));
     }
 
     #[test]
@@ -842,7 +859,8 @@ mod unit {
             stages: vec![stage(&[0], &[], &[])],
             ..tables.unit()
         };
-        assert_eq!(unit.check().err(), Some(Defect::KindUnsupported(RESULT)));
+        let unsupported = Refusal::Unsupported(Unsupported { port: RESULT });
+        assert_eq!(unit.check().err(), Some(unsupported));
     }
 
     #[test]
@@ -860,7 +878,7 @@ mod unit {
             ..tables.unit()
         };
         // 2^40 scalars against a layout of one: refused at once.
-        assert_eq!(unit.check().err(), Some(Defect::KindMismatch(RESULT)));
+        assert_eq!(unit.check().defect(), Some(Defect::KindMismatch(RESULT)));
     }
 
     #[test]
@@ -931,19 +949,19 @@ mod unit {
 
         // The two must be kept the same way, so the result has one layout.
         let unit = current(Scalar::F32, |array, _| choose(array, 0, Some(1)));
-        assert_eq!(unit.check().err(), mismatch);
+        assert_eq!(unit.check().defect(), mismatch);
 
         // The first of two must be an Optional: the initial value never is.
         let unit = current(Scalar::F64, |array, _| choose(array, 1, Some(0)));
-        assert_eq!(unit.check().err(), mismatch);
+        assert_eq!(unit.check().defect(), mismatch);
 
         // The result is of the fallback's kind, not the Optional's.
         let unit = current(Scalar::F64, |_, optional| choose(optional, 0, Some(1)));
-        assert_eq!(unit.check().err(), mismatch);
+        assert_eq!(unit.check().defect(), mismatch);
 
         // A selection must name inputs the unit has.
         let unit = current(Scalar::F64, |array, _| choose(array, 0, Some(7)));
-        assert_eq!(unit.check().err(), Some(Defect::UnknownInput(selected)));
+        assert_eq!(unit.check().defect(), Some(Defect::UnknownInput(selected)));
     }
 
     #[test]

@@ -856,6 +856,11 @@ pub enum PortRef {
 }
 
 /// Why a unit description is not well formed.
+///
+/// A defect is a mistake by whoever wrote the description, which is a code
+/// generator. It is never an error in a program, and it never happens during
+/// a run: a supplier meets it when it checks a description, before anything
+/// reaches the runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Defect {
     UnknownSlot(Slot),
@@ -897,9 +902,6 @@ pub enum Defect {
     UnknownKind(PortRef),
     /// A port refers to a layout that is not in the unit's table.
     UnknownLayout(PortRef),
-    /// A port's kind includes a fiber whose storage this contract does not
-    /// describe yet. The kind is valid; a unit cannot carry it across.
-    KindUnsupported(PortRef),
     /// A port does not match its kind: its layout does not lay out that
     /// kind, it gives the wrong number of shape values or of slots, or a
     /// shape value is of the wrong sort.
@@ -926,6 +928,28 @@ pub enum Defect {
         port: PortRef,
         plane: Plane,
     },
+}
+
+/// A description that these contracts cannot carry yet: the kind of a port
+/// includes a fiber whose storage is not described.
+///
+/// This is not a defect. The kind is valid, and a correct program can have
+/// it. A supplier reports this as not supported yet, not as a mistake of its
+/// own. Checking stops at the first such port, so the rest of the
+/// description has not been checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unsupported {
+    /// The port whose kind cannot be carried.
+    pub port: PortRef,
+}
+
+/// Why [`Unit::check`] did not accept a description.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The description is not well formed.
+    Defect(Defect),
+    /// The description cannot be carried yet.
+    Unsupported(Unsupported),
 }
 
 /// A unit description that passed [`Unit::check`].
