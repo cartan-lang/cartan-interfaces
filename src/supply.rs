@@ -30,18 +30,26 @@ pub struct Emitted {
 /// as an input, the runtime must hold that binding's value first, selecting
 /// it if it does not.
 ///
-/// Gap: a binding computed to feed another unit must be computed from the
-/// same values that unit will read. Those need not be a published State: the
-/// binding may be needed before anything is published, or for a State
-/// several unpublished updates on. How a selection states which values it is
-/// computed from is not written yet.
+/// Every value is the value of something at one definite version. A unit is
+/// compiled once and says nothing about versions: the runtime runs it for a
+/// version by binding its inputs to the values of that version, and the
+/// results are the values at that version. A binding computed to feed another
+/// unit is therefore computed for the version that unit reads. Version zero
+/// exists before any update, since every State has an initial value, so a
+/// binding can be computed before anything else has happened.
 ///
-/// Decide: how the runtime knows a held binding is still good for the State it
-/// is about to read. The simplest rule is that a binding's value stays valid
-/// while every value it was computed from is unchanged.
+/// A unit's results depend on nothing but its inputs. A value computed at
+/// one version is the value at every later version at which nothing it
+/// depends on has changed, where what it depends on runs through any
+/// bindings down to States and Params. The runtime may keep a computed value
+/// and use it again on that basis; once computed, it never has to be
+/// computed again to a different result. How the runtime notices that
+/// something has changed is its own business.
 ///
-/// Decide: whether a supplier may be asked for a unit while earlier units from
-/// it are running. The runtime needs this for a selection made after launch.
+/// A selection may be made at any time, including while units the supplier
+/// produced earlier are running. Producing a new unit never disturbs code
+/// already running or values already computed. The runtime owes values for
+/// the latest version and may skip computing them for versions in between.
 pub trait Supplier {
     type Diagnostic;
 

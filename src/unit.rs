@@ -246,6 +246,8 @@ pub struct Stage {
 
 /// Everything the runtime needs to know to run a piece of compiled code.
 ///
+/// A unit's results are a function of its inputs and of nothing else.
+///
 /// The job of a unit is to supply values at requested sites of indexed
 /// values. The values it reads and the values it produces are held in
 /// memory. That does not require a fresh copy; see `Storage::Alias`.
