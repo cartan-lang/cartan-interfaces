@@ -55,8 +55,8 @@ pub enum AxisKind {
     Periodic,
 }
 
-/// A kind of fact about a value that is only known at run time. A unit's
-/// shape record has one entry for each.
+/// A kind of fact about a value that is only known at run time. A unit
+/// states each one, as a fixed value or by naming it in its table of sizes.
 ///
 /// A value's kind fixes its structure at compile time, including the form of
 /// each Array axis. What compile time cannot fix is where an axis starts, how

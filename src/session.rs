@@ -33,9 +33,9 @@ pub enum Stop {
     Binding(Node),
     /// The unit names a memory this runtime has not set up.
     Unplaced(Memory),
-    /// The code did not do what its own description says, such as leaving a
-    /// size unstated. This is a defect in a code generator, not a run-time
-    /// outcome of the program.
+    /// The code did not do what its own description says, such as never
+    /// producing a size it determines. This is a defect in a code generator,
+    /// not a run-time outcome of the program.
     Invariant,
     /// A device or its driver failed.
     Device,

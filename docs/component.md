@@ -35,7 +35,9 @@ everything an application needs from a runtime:
   blocks.
 - `unit` describes one piece of compiled code: its inputs and results, their
   kinds, sizes and physical layout, the storage it needs and in which memory,
-  and the stages it runs.
+  and its stages. A stage is one compiled computation and the only execution
+  boundary. Sizes and presence follow the same rule as storage: each has one
+  producer, and a stage consumes only what was produced before it.
 - `supply` is what a compiler offers a runtime: units on request.
 - `session` is what an application asks of a runtime and what a runtime reports.
 
