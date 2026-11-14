@@ -1,13 +1,13 @@
-//! Every `impl` of the contract types: accessors and the checks that a
-//! description is well formed.
+//! Implementations of the contract types: accessors and structural
+//! validation.
 
 use super::*;
 use std::collections::{HashMap, HashSet};
 
-// Kinds: what a value is
+// Kinds: logical value structure
 
 impl Field {
-    /// How many scalars one element of the field has.
+    /// The scalar count of one field element.
     pub fn scalars(self) -> u64 {
         match self {
             Field::Real => 1,
@@ -17,8 +17,7 @@ impl Field {
 }
 
 impl Kinds {
-    /// The reference for a fiber, adding it to the table only if it is not
-    /// already there.
+    /// Return the fiber's reference, adding a definition only if none exists.
     pub fn fiber(&mut self, fiber: Fiber) -> FiberRef {
         let found = self.fibers.iter().position(|known| *known == fiber);
         let place = found.unwrap_or_else(|| {
@@ -28,8 +27,7 @@ impl Kinds {
         FiberRef(place as u32)
     }
 
-    /// The reference for a kind, adding it to the table only if it is not
-    /// already there.
+    /// Return the kind's reference, adding a definition only if none exists.
     pub fn define(&mut self, kind: Kind) -> KindRef {
         let found = self.kinds.iter().position(|known| *known == kind);
         let place = found.unwrap_or_else(|| {
@@ -47,7 +45,7 @@ impl Kinds {
         self.fibers.get(fiber.0 as usize)
     }
 
-    /// The fibers a fiber is built from.
+    /// The fiber's immediate constituent references.
     fn parts(fiber: &Fiber) -> Vec<FiberRef> {
         match fiber {
             Fiber::Product(members) => members.iter().map(|(_, fiber)| *fiber).collect(),
@@ -56,7 +54,7 @@ impl Kinds {
         }
     }
 
-    /// The kinds a kind is built from.
+    /// The kind's immediate constituent kind references.
     fn children(kind: &Kind) -> Vec<KindRef> {
         match kind {
             Kind::Optional(inner) => vec![*inner],
@@ -66,9 +64,8 @@ impl Kinds {
         }
     }
 
-    /// Check that the tables are well formed. Checked tables state each
-    /// fiber and each kind once, so within them equal references mean the
-    /// same thing.
+    /// Validate the tables. Each checked table contains unique definitions,
+    /// so equal references denote the same represented fiber or kind.
     pub fn check(&self) -> Result<(), KindDefect> {
         let mut seen = HashSet::new();
         for (index, fiber) in self.fibers.iter().enumerate() {
@@ -127,12 +124,11 @@ impl Kinds {
         Ok(())
     }
 
-    /// How many scalars each fiber has, one answer per fiber. The answer is
-    /// nothing if the fiber's storage is not described, or if the count does
-    /// not fit in 64 bits.
+    /// The scalar count of each fiber. An entry is `None` if storage is
+    /// unspecified or the count exceeds 64 bits.
     ///
-    /// Gap: the storage of `SO2`, `SO3`, `Mat`, `Form` and `Metric` is not
-    /// described. A port of a kind that includes one is refused as
+    /// Gap: storage for `SO2`, `SO3`, `Mat`, `Form` and `Metric` is
+    /// unspecified. Ports containing these fibers are rejected as
     /// unsupported.
     fn fiber_scalars(&self) -> Vec<Option<u64>> {
         let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.fibers.len());
@@ -158,12 +154,11 @@ impl Kinds {
         counts
     }
 
-    /// How many scalars one element of each kind has, one answer per kind,
-    /// worked out once for the whole table. The answer is nothing if the
-    /// kind includes a fiber whose storage is not described, or if the count
-    /// does not fit in 64 bits.
+    /// The scalar count per element of each kind, derived once for the table.
+    /// An entry is `None` if it contains an unsupported fiber or exceeds 64
+    /// bits.
     ///
-    /// The tables must be checked first.
+    /// The tables must be validated first.
     pub fn scalar_counts(&self) -> Vec<Option<u64>> {
         let fibers = self.fiber_scalars();
         let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.kinds.len());
@@ -179,9 +174,8 @@ impl Kinds {
         counts
     }
 
-    /// How many run-time facts a value of each kind has, one answer per
-    /// kind, worked out once for the whole table. The answer is nothing if
-    /// the count does not fit in 64 bits.
+    /// The shape-field count of each kind, derived once for the table. An
+    /// entry is `None` if the count exceeds 64 bits.
     pub fn shape_field_counts(&self) -> Vec<Option<u64>> {
         let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.kinds.len());
         for kind in &self.kinds {
@@ -201,14 +195,12 @@ impl Kinds {
         counts
     }
 
-    /// The run-time facts of a value of a kind, in order: presence first for
-    /// an Optional, a domain for an Array, and the facts of each member of a
-    /// Struct or Tuple in turn. A port lists one entry for each, in this
-    /// order.
+    /// Shape fields in port order: Optional presence before its inner fields,
+    /// an Array domain, and Struct or Tuple member fields in order.
     ///
-    /// This writes the facts of a repeated kind out in full. Ask
-    /// `shape_field_counts` first. Parts of a kind that have no facts are
-    /// not visited.
+    /// Repeated kinds expand to their full field sequence. Check
+    /// `shape_field_counts` before expansion. Constituents without shape
+    /// fields are skipped.
     pub fn shape_fields(&self, kind: KindRef) -> Vec<ShapeField> {
         let counts = self.shape_field_counts();
         let mut fields = Vec::new();
@@ -240,9 +232,8 @@ impl Kinds {
         }
     }
 
-    /// Whether a kind in these tables and a kind in other tables are the
-    /// same kind. Both must be checked. Each pair of kinds, and each pair of
-    /// fibers, is compared once, however often it is shared.
+    /// Compare kinds across validated tables. Each kind or fiber pair is
+    /// compared once, independently of how often it is shared.
     pub fn same(&self, kind: KindRef, other: &Kinds, theirs: KindRef) -> bool {
         let mut known = Compared::default();
         self.same_kind(kind, other, theirs, &mut known)
@@ -327,14 +318,14 @@ impl Kinds {
     }
 }
 
-/// The pairs already compared by `Kinds::same`.
+/// Pairs already compared by `Kinds::same`.
 #[derive(Default)]
 struct Compared {
     kinds: HashMap<(KindRef, KindRef), bool>,
     fibers: HashMap<(FiberRef, FiberRef), bool>,
 }
 
-// Layouts: how a value sits in storage
+// Layouts: physical value representation
 
 impl Scalar {
     /// Whether this scalar can store the given primitive.
@@ -355,8 +346,8 @@ impl Scalar {
 }
 
 impl Layouts {
-    /// The reference for a layout, adding it to the table only if it is not
-    /// already there.
+    /// Return the layout's reference, adding a definition only if none
+    /// exists.
     pub fn define(&mut self, layout: Layout) -> LayoutRef {
         let found = self.definitions.iter().position(|known| *known == layout);
         let place = found.unwrap_or_else(|| {
@@ -379,9 +370,8 @@ impl Layouts {
         }
     }
 
-    /// Check the table and work out what follows from each layout. No layout
-    /// may use more than `most_planes` planes, which is the number of pieces
-    /// of storage there are to put them in.
+    /// Validate the table and derive layout properties. Each layout is
+    /// limited to `most_planes`, the number of available storage regions.
     pub fn measure(&self, most_planes: u32) -> Result<Measures, LayoutDefect> {
         let mut measures = Measures {
             planes: Vec::new(),
@@ -491,7 +481,7 @@ impl Layouts {
             let span = &mut spans[plane as usize];
             *span = (span.0.min(start), span.1.max(end));
         }
-        // A plane no part uses still belongs to the group; it spans nothing.
+        // Unused planes remain part of the group with empty spans.
         for span in &mut spans {
             if span.0 == u32::MAX {
                 *span = (0, 0);
@@ -500,12 +490,11 @@ impl Layouts {
         Ok((facts, spans))
     }
 
-    /// Whether a layout lays out a kind: the same structure, part for part,
-    /// with every scalar stored in a way that can hold it. Both tables must
-    /// be checked. Each pairing of a layout with a kind or a fiber is
-    /// examined once, however often it is shared.
+    /// Test whether a layout matches a kind's structure and scalar
+    /// representations. Both tables must be validated. Each layout–kind or
+    /// layout–fiber pair is examined once, independently of sharing.
     ///
-    /// A kind whose storage is not described fits no layout.
+    /// Kinds with unspecified storage match no layout.
     pub fn fits(&self, layout: LayoutRef, kinds: &Kinds, kind: KindRef) -> bool {
         self.holds(layout, kinds, Held::Kind(kind), &mut HashMap::new())
     }
@@ -542,7 +531,7 @@ impl Layouts {
                         .iter()
                         .all(|part| self.holds(part.layout, kinds, member, known))
             }
-            // A repeat stands for a group whose parts are all alike.
+            // A repeat represents a group of identical parts.
             (Layout::Repeat { part, count, .. }, Form::Each(members)) => {
                 *count as usize == members.len()
                     && members
@@ -559,7 +548,7 @@ impl Layouts {
     }
 }
 
-/// Something a layout may be asked to lay out.
+/// A kind or fiber whose layout is being checked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Held {
     Kind(KindRef),
@@ -568,16 +557,16 @@ enum Held {
     Scalar(Primitive),
 }
 
-/// The structure of something to be laid out, one level deep.
+/// The immediate structure required by a kind or fiber.
 enum Form {
     Scalar(Primitive),
     /// Parts in order.
     Each(Vec<Held>),
-    /// A stated number of parts, all alike.
+    /// A fixed number of identical parts.
     Alike(Held, u32),
     Array(FiberRef),
     Optional(KindRef),
-    /// Storage that is not described.
+    /// An unspecified storage representation.
     Unknown,
 }
 
@@ -624,9 +613,8 @@ impl Held {
     }
 }
 
-/// The spans of `count` copies of a layout with the given spans, each copy
-/// a fixed step on from the last. The error says whether the copies overlap;
-/// otherwise something did not fit.
+/// Compute spans for `count` equally spaced copies of a layout. An error
+/// distinguishes overlapping copies from a representation limit.
 fn repeat(
     inner: &[(u32, u32)],
     count: u32,
@@ -639,7 +627,7 @@ fn repeat(
     }
     let last = count - 1;
     if plane_step == 0 {
-        // The copies share their planes, so each must clear the one before.
+        // Copies sharing planes must have non-overlapping byte spans.
         let clear = inner.iter().all(|(start, end)| offset_step >= end - start);
         if count > 1 && !clear {
             return Err(true);
@@ -650,7 +638,7 @@ fn repeat(
             .map(|(start, end)| Ok((*start, end.checked_add(reach).ok_or(false)?)))
             .collect();
     }
-    // The copies take separate planes.
+    // Copies occupy separate planes.
     if count > 1 && (plane_step as usize) < inner.len() {
         return Err(true);
     }
@@ -673,11 +661,11 @@ fn repeat(
     Ok(spans)
 }
 
-// Units: the description of compiled code
+// Units: compiled code descriptions
 
 impl ShapeValue {
-    /// How many elements a length or a domain counts, or nothing if this is
-    /// presence or the count does not fit in 64 bits.
+    /// The element count of a length or domain. Returns `None` for presence
+    /// or a count exceeding 64 bits.
     pub fn count(&self) -> Option<u64> {
         match self {
             ShapeValue::Presence(_) => None,
@@ -689,14 +677,14 @@ impl ShapeValue {
         }
     }
 
-    /// Whether this says an Optional value is absent. An absent value has no
-    /// storage and no other shape values.
+    /// Whether this denotes Optional absence. An absent value has neither
+    /// storage nor applicable inner shape values.
     pub fn is_absent(&self) -> bool {
         matches!(self, ShapeValue::Presence(false))
     }
 
-    /// Whether this is a length or a domain that counts no elements. An
-    /// empty value is present; an absent one is not empty.
+    /// Whether a length or domain contains zero elements. Emptiness denotes a
+    /// present value, distinct from absence.
     pub fn is_empty(&self) -> bool {
         self.count() == Some(0)
     }
@@ -716,17 +704,16 @@ impl Checked {
         &self.unit
     }
 
-    /// The shape values that govern what a slot holds of a result. A domain
-    /// governs the planes of its Array, and a presence governs everything
-    /// its Optional holds. A stage that writes the slot must use each of
-    /// them. Empty where the slot holds no part of a result, or a part
-    /// whose shape is fixed.
+    /// Shape dependencies governing the result portion stored in a slot.
+    /// Array domains govern their planes; Optional presence governs its
+    /// contents. Writers must consume all these dependencies. Returns an
+    /// empty slice for non-result storage or fixed shape.
     pub fn governing(&self, slot: Slot) -> &[ShapeRef] {
         self.governs.get(slot.0 as usize).map_or(&[], Vec::as_slice)
     }
 
-    /// What produces a shape value, or nothing if the description gives it
-    /// no producer. A checked unit never gives one two.
+    /// The declared producer, or `None` if absent. A checked unit has at most
+    /// one producer per shape value.
     pub fn producer(&self, shape: ShapeRef) -> Option<Producer> {
         let named = ShapeEntry::Runtime(shape);
         let brings = |input: &InputPort| input.shape.contains(&named);
@@ -737,7 +724,7 @@ impl Checked {
         input.or(stage.map(|stage| Producer::Stage(stage as u32)))
     }
 
-    /// Everything the description says depends on a shape value.
+    /// All declared consumers of a shape value.
     pub fn consumers(&self, shape: ShapeRef) -> Vec<Consumer> {
         let unit = &self.unit;
         let named = ShapeEntry::Runtime(shape);
@@ -770,7 +757,7 @@ impl Checked {
     }
 }
 
-/// What an input port and an output port state alike.
+/// Description fields shared by input and output ports.
 struct Stated<'a> {
     at: PortRef,
     kind: KindRef,
@@ -779,25 +766,24 @@ struct Stated<'a> {
     planes: &'a [Slot],
 }
 
-/// Which shape values govern each plane of one port.
+/// Shape dependencies governing each plane of a port.
 struct Governed<'a> {
     layouts: &'a Layouts,
     measures: &'a Measures,
     shape: &'a [ShapeEntry],
-    /// For each plane, the facts that govern it, once something is placed
-    /// there.
+    /// The shape fields governing each occupied plane.
     over: Vec<Option<Vec<usize>>>,
     /// Planes that hold part of a value fixed as absent.
     absent_planes: Vec<bool>,
-    /// Facts that belong to a part of a value fixed as absent.
+    /// Shape fields belonging to a part fixed as absent.
     absent_facts: Vec<bool>,
 }
 
 impl Governed<'_> {
-    /// Walk one layout placed at a plane, with its facts starting at `fact`.
-    /// Only parts that have facts of their own are entered; everything else
-    /// is one run of planes. The error is a plane two differently governed
-    /// parts were placed in.
+    /// Traverse a layout at the specified plane and shape-field index `fact`.
+    /// Only constituents with shape fields are traversed; other constituents
+    /// form a contiguous plane range. An error identifies a plane shared by
+    /// parts with different shape dependencies.
     fn walk(
         &mut self,
         layout: LayoutRef,
@@ -870,7 +856,7 @@ impl Governed<'_> {
 }
 
 impl ShapeField {
-    /// How many words a shape value of this sort takes in a [`Frame`].
+    /// The word count for this shape-field category in a [`Frame`].
     pub fn words(self) -> u32 {
         match self {
             ShapeField::Presence | ShapeField::Length => 1,
@@ -880,9 +866,9 @@ impl ShapeField {
 }
 
 impl Stage {
-    /// The frame this stage is handed, given the unit's table of shape
-    /// fields. Every slot and shape value the stage names must exist, which
-    /// a checked unit guarantees.
+    /// Derive the launch frame from the unit's shape-field table. All
+    /// referenced slots and shape values must exist, as guaranteed by a
+    /// checked unit.
     pub fn frame(&self, shape_fields: &[ShapeField]) -> Frame {
         let slots: Vec<Slot> = self.reads.iter().chain(&self.writes).copied().collect();
         let mut words = slots.len() as u32;
@@ -900,7 +886,7 @@ impl Stage {
 }
 
 impl Unit {
-    /// Check that the description is well formed and can be carried.
+    /// Validate the description's structure and supported representations.
     pub fn check(self) -> Result<Checked, Refusal> {
         match self.well_formed() {
             Ok(Ok(checked)) => Ok(checked),
@@ -909,8 +895,8 @@ impl Unit {
         }
     }
 
-    /// A defect if one is found. Otherwise the checked description, or the
-    /// first port that cannot be carried.
+    /// Return a detected defect, the validated description, or the first
+    /// unsupported port.
     fn well_formed(self) -> Result<Result<Checked, Unsupported>, Defect> {
         let storage = |slot: Slot| {
             self.storage
@@ -947,18 +933,16 @@ impl Unit {
             }
         }
 
-        // Each kind and each layout is stated once and well formed.
+        // Validate unique kind and layout definitions.
         self.kinds.check().map_err(Defect::Kind)?;
         let scalars = self.kinds.scalar_counts();
         let facts = self.kinds.shape_field_counts();
         let most_planes = u32::try_from(self.storage.len()).unwrap_or(u32::MAX);
         let measures = self.layouts.measure(most_planes).map_err(Defect::Layout)?;
 
-        // A shape value is produced by the value bound to an input or by one
-        // stage.
+        // Shape values originate from bound inputs or stages.
         let mut produced = vec![false; self.shape_fields.len()];
-        // The shape values that govern what each slot holds of a result, and
-        // the shape values results have.
+        // Track slot shape dependencies and result shape fields.
         let mut governs: Vec<Vec<ShapeRef>> = vec![Vec::new(); self.storage.len()];
         let mut owed: Vec<ShapeRef> = Vec::new();
 
@@ -980,8 +964,7 @@ impl Unit {
             let at = port.at;
             let input = matches!(at, PortRef::Input(_));
 
-            // The port's layout lays out its kind, and it gives one entry
-            // for each fact and one slot for each plane.
+            // Check layout compatibility, shape-field count and plane count.
             let kind = port.kind.0 as usize;
             let layout = port.layout.0 as usize;
             match scalars.get(kind) {
@@ -1012,8 +995,7 @@ impl Unit {
                 }
             }
 
-            // Each plane has storage of the right sort, to itself, with
-            // elements large enough for what the layout keeps there.
+            // Check each plane's storage role, exclusivity and element size.
             let mut used: Vec<Slot> = Vec::new();
             for (plane, slot) in port.planes.iter().enumerate() {
                 let stated = storage(*slot)?;
@@ -1051,7 +1033,7 @@ impl Unit {
                 }
             }
 
-            // Which shape values govern each plane.
+            // Collect each plane's shape dependencies.
             let mut governed = Governed {
                 layouts: &self.layouts,
                 measures: &measures,
@@ -1086,7 +1068,7 @@ impl Unit {
             owed.extend(applies.filter_map(runtime));
         }
 
-        // A selection chooses among inputs of the right kinds, kept one way.
+        // Selections require compatible input kinds and identical layouts.
         for (index, selection) in self.selected.iter().enumerate() {
             let at = PortRef::Selected(index as u32);
             let input = |index: u32| {
@@ -1107,8 +1089,8 @@ impl Unit {
                         Some(Layout::Optional(kept)) => Some(*kept),
                         _ => None,
                     };
-                    // The other input is either what `first` may hold, or
-                    // itself an Optional of it; the result is of its kind.
+                    // The fallback may be the inner kind or its Optional
+                    // form; its kind determines the result.
                     let whole = holds == Some(otherwise.kind) && kept == Some(otherwise.layout);
                     let optional = holds.is_some()
                         && first.kind == otherwise.kind
@@ -1121,8 +1103,7 @@ impl Unit {
             }
         }
 
-        // A stage consumes only what was produced before it, and each shape
-        // value has one producer.
+        // Enforce production before consumption and unique shape producers.
         let mut provided = vec![false; self.storage.len()];
         for (index, stage) in self.stages.iter().enumerate() {
             let index = index as u32;
@@ -1149,7 +1130,7 @@ impl Unit {
                         slot: *slot,
                     });
                 };
-                // Providing the storage consumes what its capacity names.
+                // Storage provision consumes capacity dependencies.
                 if !std::mem::replace(&mut provided[slot.0 as usize], true) {
                     for entry in &need.capacity.0 {
                         match entry {
@@ -1160,7 +1141,7 @@ impl Unit {
                         }
                     }
                 }
-                // Filling part of a result consumes what governs it.
+                // Result writes consume the governing shape values.
                 for field in &governs[slot.0 as usize] {
                     if !stage.uses.contains(field) {
                         return Err(Defect::GoverningShapeUnused {

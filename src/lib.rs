@@ -1,69 +1,61 @@
-//! The draft contracts between Cartan components.
+//! Draft contracts between Cartan components.
 //!
-//! This file holds every declaration: the types each component owns and what
-//! it offers the others, in reading order. Each type's documentation is the
-//! one definition of its term. Everything is plain description with no
-//! dependencies. The `impl`s, including the checks that a description is well
-//! formed, are in `checks.rs`, and their tests are in `tests.rs`.
+//! This file contains all type and trait declarations in reading order. Each
+//! type's documentation defines its terminology. The crate has no
+//! dependencies and represents descriptions rather than implementations.
+//! Accessors and well-formedness checks are in `checks.rs`; tests are in
+//! `tests.rs`.
 //!
-//! There are two layers. The runtime-facing contracts come first: kinds,
-//! layouts, programs, units, supply and sessions. They are everything the
-//! runtime needs from a compiler and everything an application needs from
-//! the runtime, and they use nothing from the second layer, so a compiler
-//! built from other components can implement [`Supplier`] and be run by the
-//! same runtime. Building with `--no-default-features` compiles this layer
-//! alone.
+//! The runtime-facing layer defines kinds, layouts, programs, units, supply
+//! and sessions. It specifies the compiler–runtime and application–runtime
+//! boundaries without depending on the pipeline layer. An independent
+//! compiler can implement [`Supplier`] for the same runtime. Build with
+//! `--no-default-features` to compile this layer alone.
 //!
-//! The pipeline contracts come last, behind the `pipeline` feature: syntax,
-//! graph, code generation and preparation. They are the contracts between
-//! the components of the official compiler.
+//! The pipeline layer defines the boundaries between the official compiler's
+//! syntax, graph, code generation and preparation components. It is enabled
+//! by the `pipeline` feature.
 //!
-//! A code generator describes each piece of compiled code as a [`Unit`]: the
-//! values it reads, the values it produces, the storage it needs and the
-//! stages it runs. The runtime owns everything live. It binds inputs,
-//! provides storage, starts the stages and publishes results. Compiled code
-//! never allocates memory and never publishes.
+//! A code generator describes compiled code as a [`Unit`]: its inputs,
+//! results, storage requirements and stages. The runtime binds inputs,
+//! provides storage, launches stages and publishes results. Compiled code
+//! neither allocates memory nor publishes results.
 //!
-//! Everything here is a draft. Doc paragraphs starting `Gap:` name parts of a
-//! contract that are not written yet; paragraphs starting `Decide:` name open
-//! choices.
+//! All contracts are drafts. Paragraphs beginning `Gap:` identify unspecified
+//! parts; those beginning `Decide:` identify open design choices.
 
 // ===========================================================================
-// Kinds: what a value is
+// Kinds: logical value structure
 // ===========================================================================
 //
-// What a value is: its kind.
+// Kinds identify the language values that cross component boundaries.
+// Analysis assigns kinds to expressions; this section defines their shared
+// representation.
 //
-// Kinds are the language's own. This section writes down the ones that cross
-// a boundary so that every component names them the same way. The rules that
-// give an expression its kind are not here; they belong to analysis.
+// A kind is logical: `Int` specifies neither a bit width nor a storage
+// location. Ports specify those representation choices.
 //
-// A kind is logical. It says `Int`, not how many bits an Int has, and it says
-// nothing about where a value is stored. Those are choices a port states.
+// A fiber is fixed-width plain data and is the only permitted Array element.
+// Kinds consist of fibers or structures built from fibers and other kinds.
+// The type definitions exclude invalid combinations such as Arrays of
+// Structs.
 //
-// A fiber is plain data of fixed width, and it is the only thing the element
-// of an Array can be. A kind is a fiber or is built from fibers and kinds.
-// The types say which is which, so a mistake such as an Array of Structs
-// cannot be written.
+// Fibers and kinds are defined once in separate tables and referenced by
+// index. Nested Structs and fibers shared by several Arrays therefore need
+// only one definition and one derivation of their properties.
 //
-// A fiber and a kind are each stated once. They live in two tables, and
-// wherever one is used it is referred to by its place in its table. A Struct
-// nested inside another, or a fiber used by many Arrays, appears once however
-// often it is used, and its facts are worked out once.
+// The fiber definitions are not exhaustive and do not require every component
+// to support every fiber. Storage representations remain unspecified where
+// their definition would be costly; components may report those fibers as
+// unsupported.
 //
-// The fibers named here each have one definition. The list is not claimed to
-// be complete. Naming a fiber does not oblige any component to support it.
-// Where stating how a fiber is stored would be costly, this section declines
-// to: it answers "not described" and a component is free to report the
-// fiber as unsupported.
-//
-// There is no kind for a function. Functions are resolved during analysis
-// and none is a value that crosses a boundary.
+// Functions are resolved during analysis and are not values that cross these
+// boundaries.
 //
 // Gap: Lists, Maps, Strings, the unit kind `None`, ranges, boxes and views
-// are kinds of the language that are not written here yet.
+// are not yet represented.
 
-/// One scalar of a value, before any choice of width.
+/// A scalar category independent of representation width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Primitive {
     Bool,
@@ -71,13 +63,12 @@ pub enum Primitive {
     Real,
 }
 
-/// The form of one axis of an Array. It is part of the Array's kind, so two
-/// Arrays whose axes differ in form are different kinds. A kind always states
-/// the form of every axis; a written type that states only a rank means every
-/// axis is closed.
+/// The form of an Array axis, as part of the Array's kind. Arrays with
+/// different axis forms have different kinds. Every axis has an explicit
+/// form; a written type specifying only rank denotes closed axes.
 ///
-/// Gap: how the stored part of an axis that is open at an end is described,
-/// given that only a finite part can be stored, is not written yet.
+/// Gap: the representation of a finite stored portion of an axis with an open
+/// end is unspecified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AxisKind {
     /// Bounded at both ends, written `0..100`.
@@ -92,17 +83,17 @@ pub enum AxisKind {
     Periodic,
 }
 
-/// A kind of fact about a value that is only known at run time. A unit
-/// states each one, as a fixed shape value or by naming it in its table.
+/// A category of runtime shape information. A unit supplies each shape field
+/// as a fixed value or a reference into its shape table.
 ///
-/// A value's kind fixes its structure at compile time, including the form of
-/// each Array axis. What compile time cannot fix is where an axis starts, how
-/// many elements there are, and whether an Optional value is present.
+/// A kind fixes structural properties, including Array axis forms, at compile
+/// time. Shape fields describe axis origins and extents, List lengths and
+/// Optional presence.
 ///
-/// Presence is a shape value like a length or a domain, but it counts
-/// nothing, and an absent value is not an empty one. An absent value owns no
-/// storage, and its lengths and domains do not apply: they are neither read
-/// nor used to decide how much storage to provide.
+/// Presence is a shape field but does not count elements. An absent value is
+/// distinct from an empty value: it owns no storage, and its lengths and
+/// domains are inapplicable. Those fields are neither read nor used to
+/// determine storage capacity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeField {
     /// Whether an Optional value is present.
@@ -113,7 +104,7 @@ pub enum ShapeField {
     Domain { rank: usize },
 }
 
-/// What a vector space is over.
+/// The scalar field of a vector space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Field {
     Real,
@@ -121,37 +112,37 @@ pub enum Field {
     Complex,
 }
 
-/// A reference to one fiber: its place in a table of fibers.
+/// An index into a table of fiber definitions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FiberRef(pub u32);
 
-/// Plain data of fixed width: what one site of an Array holds. A fiber has
-/// no references and nothing that is only known at run time.
+/// Fixed-width plain data suitable for one Array element. A fiber contains
+/// neither references nor information determined only at run time.
 ///
-/// A fiber is stated in terms of references to the fibers it is built from.
-/// A Product and a Sum are identified by their names, their order and what
-/// each holds. The name a fiber was declared under is not part of it.
+/// Composite fibers refer to their constituent fibers. Product and Sum
+/// identity includes member names, order and payload types, but excludes the
+/// name under which the fiber was declared.
 ///
-/// Gap: a product's declared algebra is also part of its identity and is not
-/// represented here. Two products that differ only in algebra are therefore
-/// treated as one fiber, which is wrong.
+/// Gap: a Product's declared algebra is part of its identity but is not
+/// represented. Products differing only in algebra are therefore incorrectly
+/// identified as the same fiber.
 ///
-/// Gap: the dual of a vector space is a distinct fiber and is not named
-/// here.
+/// Gap: the dual of a vector space is a distinct fiber but is not
+/// represented.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Fiber {
     Bool,
     Int,
     Real,
-    /// An exact fraction: a numerator and a positive denominator.
+    /// An exact fraction with a numerator and a positive denominator.
     Rational,
     /// A complex number: `re` and `im`.
     Complex,
     /// A color: `r`, `g`, `b` and `a`.
     Color,
-    /// An element of a vector space over a field, with a stated number of
-    /// components, at least one. An integer vector is not one, since the
-    /// Ints are not a field.
+    /// An element of a vector space with at least one component over the
+    /// specified field. Integer vectors are excluded because the integers do
+    /// not form a field.
     Vector {
         over: Field,
         count: u32,
@@ -176,45 +167,42 @@ pub enum Fiber {
     },
     /// Named components in order.
     Product(Vec<(String, FiberRef)>),
-    /// Exactly one of an ordered roster of at least two distinctly named
-    /// variants, each with a payload or none.
+    /// Exactly one of at least two ordered, distinctly named variants, each
+    /// with an optional payload.
     Sum(Vec<(String, Option<FiberRef>)>),
 }
 
-/// A reference to one kind: its place in a table of kinds.
+/// An index into a table of kind definitions.
 ///
-/// Within one checked table, two references name the same kind exactly when
-/// they are equal, as far as these contracts represent kinds. They do not yet
-/// represent a product's algebra, so that guarantee does not reach products
-/// that differ only in algebra.
+/// Within a checked table, references are equal exactly when they denote the
+/// same represented kind. This guarantee excludes distinctions not yet
+/// represented, such as Products differing only in algebra.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KindRef(pub u32);
 
-/// What a value is, stated in terms of references to the fibers and kinds it
-/// is built from.
+/// The logical structure of a value, expressed through references to its
+/// constituent fibers and kinds.
 ///
-/// A value is a fiber, or it is built from fibers: an Array holds one fiber
-/// at every site, and an Optional, a Struct and a Tuple hold values of any
-/// kind. Only a fiber can be the element of an Array, and that is what the
-/// types here say.
+/// An Array contains a fiber at each site. Optionals, Structs and Tuples may
+/// contain values of any kind. The types enforce the restriction that Array
+/// elements are fibers.
 ///
-/// A Struct is identified by its names, their order and what each holds; a
-/// Tuple by its positions. The name a kind was declared under is not part of
-/// it. A Struct and a Product with the same names and members are different,
-/// and so are a Tuple and a Vector.
+/// Struct identity includes member names, order and kinds; Tuple identity
+/// follows its positions. Declaration names are excluded. A Struct and a
+/// Product remain distinct even with identical names and members, as do a
+/// Tuple and a Vector.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
-    /// A value that is one fiber.
+    /// A single fiber value.
     Fiber(FiberRef),
-    /// One fiber at every site of a domain. The kind states how many axes the
-    /// domain has and the form of each. Where each axis starts and how far it
-    /// extends is not part of the kind.
+    /// One fiber at each site of a domain. The kind specifies the number and
+    /// form of its axes; origins and extents belong to the value's shape.
     Array {
         element: FiberRef,
         axes: Vec<AxisKind>,
     },
-    /// A value of the inner kind, or absence. Optional kinds do not nest:
-    /// "absent or absent or a value" is the same as "absent or a value".
+    /// A value of the inner kind or absence. Directly nested Optionals are
+    /// excluded: repeated absence has the same meaning as a single absence.
     Optional(KindRef),
     /// Named members in order, each of any kind.
     Struct(Vec<(String, KindRef)>),
@@ -222,30 +210,30 @@ pub enum Kind {
     Tuple(Vec<KindRef>),
 }
 
-/// Why the tables of fibers and kinds are not well formed.
+/// A violation of the fiber or kind table's structural requirements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KindDefect {
-    /// A fiber refers to a fiber that is not stated before it. Fibers are
-    /// built only from earlier fibers, so no fiber contains itself.
+    /// A fiber references itself or a later definition. References must point
+    /// to earlier fibers, excluding recursive definitions.
     FiberNotYetStated { at: FiberRef, names: FiberRef },
     /// A Vector has no components, or a Sum has fewer than two variants or
     /// repeats a variant name.
     Malformed { at: FiberRef },
-    /// Two entries state the same fiber. A fiber is stated once.
+    /// Duplicate fiber definitions.
     FiberStatedTwice { first: FiberRef, again: FiberRef },
-    /// A kind names a fiber that is not in the table.
+    /// A kind references an undefined fiber.
     UnknownFiber { at: KindRef, names: FiberRef },
-    /// A kind refers to a kind that is not stated before it. Kinds are built
-    /// only from earlier kinds, so no kind contains itself.
+    /// A kind references itself or a later definition. References must point
+    /// to earlier kinds, excluding recursive definitions.
     NotYetStated { at: KindRef, names: KindRef },
     /// An Optional directly holds an Optional.
     NestedOptional { at: KindRef },
-    /// Two entries state the same kind. A kind is stated once.
+    /// Duplicate kind definitions.
     StatedTwice { first: KindRef, again: KindRef },
 }
 
-/// The fibers and kinds that descriptions refer to, each stated once. A fiber
-/// refers only to fibers before it, and a kind only to kinds before it.
+/// Unique fiber and kind definitions. References to fibers within a fiber, or
+/// to kinds within a kind, must point to earlier entries.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kinds {
     pub fibers: Vec<Fiber>,
@@ -253,40 +241,34 @@ pub struct Kinds {
 }
 
 // ===========================================================================
-// Layouts: how a value sits in storage
+// Layouts: physical value representation
 // ===========================================================================
 //
-// How a value sits in storage: its layout.
+// A layout specifies where a value's scalars are stored. A kind may admit
+// several layouts: an Array of Products may store each Product in one plane,
+// distribute its components across planes, or combine these arrangements.
 //
-// A kind says what a value is. A layout says where its scalars are kept. One
-// kind can have many layouts: an Array of a product may keep whole products
-// side by side in one plane, keep each component in a plane of its own, or
-// mix the two.
+// Layouts follow kind structure and are defined once in a table, with
+// references to constituent layouts. Shared layouts do not require repeated
+// definitions.
 //
-// A layout follows the structure of its kind and is stated in the same way:
-// once, in a table, in terms of references to the layouts it is built from.
-// A layout used at many places in a value appears once.
+// A layout identifies planes by zero-based indices, independently of any
+// allocation. A port supplies one storage slot per plane.
 //
-// A layout does not name storage. It numbers the planes it uses from zero
-// and places its parts among them, so the same layout serves every value
-// laid out that way. A port supplies the actual storage, one slot for each
+// A plane is a sequence of equally sized elements. Scalars occupy byte
+// offsets within an element; the layout specifies the byte range used in each
 // plane.
-//
-// A plane is a run of equal-sized elements. Within one element, a scalar
-// sits at a byte offset. A layout says, for each of its planes, which bytes
-// of an element it uses.
 
-/// A machine scalar: how one scalar of a value is stored.
+/// The machine representation of a scalar.
 ///
-/// Gap: a scalar here says how a value is stored. It does not say at what
-/// width arithmetic on it is done. Int arithmetic wraps at the Int's width
-/// and Real arithmetic depends on precision, so that is not a layout choice
-/// and nothing here grants the freedom to change it.
+/// Gap: storage width does not specify arithmetic width. Int arithmetic wraps
+/// at its arithmetic width, and Real arithmetic depends on precision. These
+/// are semantic properties, not layout choices; this contract does not permit
+/// changing them.
 ///
-/// An Int is stored as `I32` or `I64` and a Real as `F32` or `F64`. A Bool
-/// is stored as `I32` holding 0 for false or 1 for true; no other value is a
-/// Bool. The check on a description cannot see the stored values, so keeping
-/// to 0 and 1 is the duty of whoever writes one.
+/// An Int uses `I32` or `I64`; a Real uses `F32` or `F64`. A Bool uses `I32`
+/// with 0 for false and 1 for true. Description checks cannot inspect stored
+/// values, so writers must enforce this Boolean representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scalar {
     I32,
@@ -295,112 +277,107 @@ pub enum Scalar {
     F64,
 }
 
-/// One plane of a layout, by its number: a run of equal elements. A layout
-/// numbers the planes it uses from zero, and whoever holds a value laid out
-/// that way supplies a piece of storage for each.
+/// A zero-based plane index within a layout. Each plane contains equally
+/// sized elements and requires storage supplied by the value's holder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Plane(pub u32);
 
-/// A reference to one layout: its place in a table of layouts.
+/// An index into a table of layout definitions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LayoutRef(pub u32);
 
-/// One part of a group: a layout, moved along by a number of planes and a
-/// number of bytes within an element.
+/// A constituent layout positioned within a group by plane and byte offsets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Part {
     pub layout: LayoutRef,
-    /// The part's plane zero is this plane of the group.
+    /// The group's plane corresponding to this part's plane zero.
     pub plane: Plane,
-    /// The part's byte zero is this byte of an element.
+    /// The byte offset of this part within an element.
     pub offset: u32,
 }
 
-/// One layout, stated in terms of references to the layouts it is built from.
-///
-/// Each layout uses some number of planes, numbered from zero, and has some
-/// number of run-time facts, in order. Both follow from its parts.
+/// A layout defined through references to constituent layouts. Its plane
+/// count and ordered shape fields are derived from those constituents.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Layout {
     /// One scalar, at the start of an element of one plane.
     Scalar(Scalar),
-    /// Parts in the order the kind lists them. Parts placed in the same plane
-    /// at different offsets are kept side by side in each element. Parts
-    /// placed in different planes are kept apart. A group lays out a
-    /// Product, a Struct or a Tuple, member by member. It lays out a
-    /// `Rational` as its numerator and denominator, a `Complex` as `re` and
-    /// `im`, and a `Color` as `r`, `g`, `b` and `a`. It lays out a Sum as an
-    /// Int tag holding the active variant's position, then every variant's
-    /// payload in declared order; the payloads of the variants that are not
-    /// active hold zero.
+    /// Parts in kind order. Parts sharing a plane occupy different byte
+    /// offsets within each element; parts in separate planes have separate
+    /// storage.
+    ///
+    /// A group represents Product, Struct and Tuple members in order; a
+    /// Rational's numerator and denominator; a Complex value's `re` and `im`;
+    /// or a Color's `r`, `g`, `b` and `a`. A Sum uses an Int tag for the
+    /// active variant's position, followed by all variant payloads in
+    /// declaration order. Inactive payloads contain zero.
     Group(Vec<Part>),
-    /// A stated number of copies of one layout, each a fixed step on from the
-    /// one before. The copies either share their planes and step by bytes,
-    /// or take separate planes. A repeat lays out a Vector, and may stand in
-    /// for any group whose parts are all alike.
+    /// A fixed number of equally spaced copies of one layout. Copies either
+    /// share planes at distinct byte offsets or occupy separate planes. This
+    /// represents a Vector or any group of identical parts.
     Repeat {
         part: LayoutRef,
         count: u32,
         plane_step: u32,
         offset_step: u32,
     },
-    /// An Array: one element at every site of a domain, in the planes its
-    /// element uses. Its one fact is the domain.
+    /// An Array with one element at each domain site, using the element's
+    /// planes. Its sole shape field is the domain.
     Array(LayoutRef),
-    /// An Optional: a value that may be absent. Its first fact is presence,
-    /// followed by the facts of what it holds.
+    /// An Optional whose shape fields begin with presence, followed by those
+    /// of its inner value.
     Optional(LayoutRef),
 }
 
-/// Why a table of layouts is not well formed.
+/// A violation of a layout table's structural requirements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutDefect {
-    /// A layout refers to one that is not stated before it.
+    /// A layout references itself or a later definition.
     NotYetStated { at: LayoutRef, names: LayoutRef },
-    /// A layout uses more planes than the unit has storage, or a count or
-    /// byte offset does not fit.
+    /// A layout exceeds the available plane count, or a count or byte offset
+    /// exceeds its representation.
     TooLarge { at: LayoutRef },
-    /// Two parts of a group use the same bytes of the same plane. Parts are
-    /// compared by the whole range of bytes each spans in a plane.
+    /// Two group parts overlap within a plane. Overlap is checked over each
+    /// part's full byte span.
     PartsOverlap {
         at: LayoutRef,
         first: u32,
         second: u32,
     },
-    /// The copies of a repeat run into one another: they share planes but
-    /// step by fewer bytes than one copy spans, or step by fewer planes than
-    /// one copy uses.
+    /// Repeated copies overlap: their byte stride is smaller than one copy's
+    /// span in shared planes, or their plane stride is smaller than one
+    /// copy's plane count.
     CopiesOverlap { at: LayoutRef },
-    /// The element of an Array has run-time facts of its own. An element is
-    /// a fiber, which has none.
+    /// An Array element has shape fields. Array elements must be fibers,
+    /// which have no shape fields.
     FactsInElement { at: LayoutRef },
-    /// Two definitions state the same layout. A layout is stated once.
+    /// Duplicate layout definitions.
     StatedTwice { first: LayoutRef, again: LayoutRef },
 }
 
-/// A table of layouts. Each definition refers only to definitions before it.
+/// Layout definitions whose references point only to earlier entries.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Layouts {
     pub definitions: Vec<Layout>,
 }
 
-/// What follows from each layout in a checked table, worked out once.
+/// Properties derived once for each layout in a checked table.
 #[derive(Clone, Debug)]
 pub struct Measures {
-    /// How many planes each layout uses.
+    /// The plane count of each layout.
     pub planes: Vec<u32>,
-    /// How many run-time facts each layout has.
+    /// The shape-field count of each layout.
     pub facts: Vec<u64>,
-    /// For each layout, the bytes of an element it spans in each of its
-    /// planes, as a start and an end.
+    /// The start and end of each layout's byte span within an element of each
+    /// plane.
     pub spans: Vec<Vec<(u32, u32)>>,
 }
 
 // ===========================================================================
-// Programs: what a source declares
+// Programs: source declarations
 // ===========================================================================
 //
-// The nodes of a program's dependency graph, and what a source calls them.
+// Program dependency nodes and their source names.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StateId(pub u32);
@@ -408,46 +385,43 @@ pub struct StateId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParamId(pub u32);
 
-/// The identity of one derived value. Identical computations have the same
-/// identity, whatever the source calls them and whether or not it names them
-/// at all.
+/// The identity of a derived value. Identical computations share an identity
+/// regardless of source names, including unnamed computations.
 ///
-/// Gap: what makes two computations identical is decided where the source is
-/// analyzed and is not written here. An identity holds within one analyzed
-/// program; whether it survives a change to the source is not settled.
+/// Gap: analysis determines computational identity, but its criteria are
+/// unspecified here. Identity is valid within one analyzed program; stability
+/// across source changes is unresolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DerivedId(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UpdateId(pub u32);
 
-/// One node of a program's dependency graph: something that has a value at
-/// each version.
+/// A program dependency node with a value at each version.
 ///
-/// A State and a Param are identified by name. Two with the same
-/// declaration are still different, because each has its own history. A
-/// derived value is identified by what it computes. Two bindings that
-/// compute the same thing are one node with one value, and a value the
-/// source never names is a node like any other.
+/// States and Params are identified by name. Distinct declarations retain
+/// separate identities and histories even when their definitions are
+/// identical. Derived values are identified by computation: bindings with
+/// identical computations share one node. Unnamed derived values have the
+/// same status as named ones.
 ///
-/// A node is the same everywhere it appears: in a unit's ports, in what the
-/// runtime holds and in what is demanded. Port order and type numbering are
-/// never identity. A node does not identify one value: it has a value at
-/// each version and in each run.
+/// Node identity is consistent across unit ports, retained values and
+/// demands. Port order and type-table indices do not establish identity. A
+/// node identifies a computation or declaration, with a value at each version
+/// in each run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Node {
-    /// Written by update blocks; belongs to the run.
+    /// State owned by the run and written by update blocks.
     State(StateId),
-    /// Set from outside the run; never written by an update.
+    /// A parameter set externally and never written by an update.
     Param(ParamId),
-    /// A pure function of States, Params and other derived values. Never
-    /// written. A unit may take one as an input once its value has been
-    /// computed.
+    /// A pure function of States, Params and other derived values. It is
+    /// never assigned; once computed, its value may be bound as a unit input.
     Derived(DerivedId),
 }
 
-/// One name the source gives a node: the node, its spelling and its kind.
-/// Several names may be given to one derived value.
+/// A source name, node identity and kind. Several names may refer to the same
+/// derived value.
 #[derive(Clone, Debug)]
 pub struct Declared {
     pub node: Node,
@@ -456,60 +430,55 @@ pub struct Declared {
     pub kind: KindRef,
 }
 
-/// One thing a supplier can be asked to compute.
+/// A computation requested from a supplier.
 ///
-/// A State stands for the value it has now. Its initial value, and the value
-/// an update gives it, are different computations, so each has its own form
-/// of demand. A demand says nothing about what is done with the result.
+/// A State's current value, initial value and next value are distinct
+/// computations with distinct demand forms. A demand does not specify how the
+/// runtime uses the result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Demand {
-    /// The value a node has: a derived value, a Param, or a State as it
-    /// stands.
+    /// The current value of a derived node, Param or State.
     Value(Node),
-    /// The value a State starts with. Initial values are closed: they read no
-    /// State and no Param. A State that starts absent and is later given a
-    /// field computed from Params gets that field from an ordinary binding,
-    /// not from its initial value.
+    /// A State's initial value. Initial values are closed: they read neither
+    /// States nor Params. If a State begins absent and later receives a field
+    /// computed from Params, an ordinary binding supplies that field.
     Initial(StateId),
-    /// The value a Param has when a run is started without giving it one.
-    /// Defaults are closed in the same way.
+    /// A Param's default value when none is supplied at launch. Defaults are
+    /// closed under the same restriction as initial values.
     Default(ParamId),
-    /// The value one update block gives one of the States it writes, computed
-    /// from the State as it stands.
+    /// The next value assigned to one State by an update block, computed from
+    /// the current State.
     Next { update: UpdateId, state: StateId },
 }
 
-/// One update block and the States it writes.
+/// An update block and the States it writes.
 ///
-/// An update is one atomic transition of a run. Every State the block writes
-/// gets its next value, each computed from the States as they stand at one
-/// version, and the run moves to the next version with all of them at once.
+/// An update is an atomic transition. All next values are computed from one
+/// version of the States, then take effect together as the run advances to
+/// the next version.
 #[derive(Clone, Debug)]
 pub struct Update {
     pub id: UpdateId,
     pub writes: Vec<StateId>,
 }
 
-/// Everything one analyzed source declares.
-///
-/// The supplier assigns the ids. The runtime treats them as opaque and uses
-/// the labels only to resolve what a user asks for.
+/// The declarations of an analyzed source. The supplier assigns identifiers;
+/// the runtime treats them as opaque and uses labels to resolve user
+/// requests.
 #[derive(Clone, Debug, Default)]
 pub struct Program {
-    /// Every kind the declared nodes use, each stated once.
+    /// Unique kind definitions used by declared nodes.
     pub kinds: Kinds,
     pub declared: Vec<Declared>,
-    /// Update blocks, in the order the source writes them. That is not the
-    /// order in which they run. Everything one block writes on one execution
-    /// takes effect together.
+    /// Update blocks in source order, which does not prescribe execution
+    /// order. All writes from one execution of a block take effect
+    /// atomically.
     pub updates: Vec<Update>,
 }
 
 // ===========================================================================
-// Units: the description of compiled code
+// Units: compiled code descriptions
 // ===========================================================================
-//
-// The description of one piece of compiled code.
 
 /// One axis of an Array domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,83 +487,74 @@ pub struct Axis {
     pub extent: u64,
 }
 
-/// One fact about a value that is only known at run time: the length of a
-/// List, the domain of an Array, or whether an Optional is present.
+/// A value's runtime shape information: List length, Array domain or Optional
+/// presence.
 ///
-/// A shape value is logical. It says how many elements a value has and where,
-/// or whether the value is there at all. It is not a number of bytes. The
-/// bytes of one element are fixed at compile time, and the bytes of an
-/// allocation are never stated in a unit: the runtime works them out.
+/// Shape describes element counts, locations or presence, independently of
+/// byte size. Element size is fixed at compile time. A unit never specifies
+/// an allocation's byte count; the runtime derives it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeValue {
-    /// Whether an Optional value is present. It counts nothing.
+    /// Optional presence, distinct from an element count.
     Presence(bool),
     Length(u64),
     Domain(Vec<Axis>),
 }
 
-/// One shape value in a unit's table of them.
+/// An index into a unit's shape-value table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShapeRef(pub u32);
 
-/// A shape value that is either fixed in the code or named in the unit's
-/// table.
+/// A fixed shape value or a reference into the unit's shape table.
 ///
-/// A shape value belongs to the value it describes and is kept apart from
-/// that value's planes. An absent value has a presence and no storage, and a
-/// value that is kept keeps its shape values with it.
+/// Shape values are separate from a value's storage planes and remain
+/// associated with any retained value. An absent value has a presence field
+/// but no storage.
 ///
-/// Shape values are consumed the way storage is: only after they are
-/// produced. Unlike storage, which several stages may write in list order, a
-/// shape value is fixed once produced, so each named one has one producer
-/// and any number of consumers. The shape values of an input come with the
-/// value bound to it. Any other is determined by one stage. A stage that
-/// uses it, storage whose capacity names it and a result that has it are its
-/// consumers. Several ports may refer to one shape value. That states once
-/// that the values have the same shape.
+/// A shape value must be produced before use. Unlike storage, which stages
+/// may write sequentially, a named shape value is immutable after production
+/// and has one producer and any number of consumers. Input shape values
+/// accompany the bound input; each remaining shape value is determined by one
+/// stage. Consumers include stages, storage capacities and results. Several
+/// ports may reference the same shape value to express equal shape.
 ///
-/// The runtime is a consumer too, but only where something it does needs the
-/// value: providing storage whose capacity names it, verifying a
-/// specialization, making a selection, or answering an observation. A shape
-/// value that only compiled code consumes need not be read by the runtime.
+/// The runtime consumes a shape value when needed to provide storage, verify
+/// a specialization, select an input or answer an observation. It need not
+/// read shape values consumed only by compiled code. Before a runtime
+/// operation uses a shape value, the value must be valid for the current
+/// inputs. If unavailable, it must be obtained before that operation
+/// proceeds; this dependency alone does not delay unrelated work.
 ///
-/// Before such an operation uses a shape value, the runtime must hold the
-/// value that applies to the inputs being used. If it holds no valid one, it
-/// obtains it before that operation proceeds. This dependency does not by
-/// itself make unrelated work wait.
+/// An unproduced shape value is distinct from a presence value indicating
+/// absence. Shape fields inside an absent Optional are inapplicable and are
+/// neither produced nor consumed. For example, computing a length when
+/// present and zero otherwise consumes presence in both cases, but consumes
+/// length only when present. Storage reserved for an absent result remains
+/// unused. Validation checks declared dependencies, independently of which
+/// shape values apply during a particular run.
 ///
-/// A shape value that was never produced is different from a presence that
-/// says a value is absent. Producing and consuming apply only where a shape
-/// value applies. Those within an Optional that turns out absent are not
-/// produced, and a stage that uses them consumes nothing then: a stage that
-/// works out a length when present, and zero otherwise, uses the presence
-/// and, only when present, the length. Storage provided for a result that
-/// turns out absent goes unused. The check works from what the description
-/// declares, not from which shape values apply on a given run.
+/// On an input port, `Fixed` denotes specialization. The runtime must verify
+/// the bound value's shape before any stage executes. Extent changes require
+/// recompilation only when the code specializes on those extents. Inputs
+/// sharing a shape reference must agree; distinct shapes are never treated as
+/// equal.
 ///
-/// In an input port, `Fixed` is a specialization: the value bound must have
-/// that shape, and the runtime verifies it before any stage runs. A change
-/// of extent needs no recompilation unless the code chose to specialize on
-/// it. Two inputs that refer to one shape value must agree in the same way.
-/// The runtime never treats two different shapes as one.
-///
-/// Gap: how a shape value is physically kept, in which memory, how it reaches
-/// a stage or a later consumer, and how a stage is told that one does not
-/// apply, is not written.
+/// Gap: physical representation, memory placement, transfer to consumers and
+/// notification of inapplicable shape values are unspecified.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeEntry {
     Fixed(ShapeValue),
     Runtime(ShapeRef),
 }
 
-/// Where a piece of storage lives.
+/// The memory containing a storage region.
 ///
-/// Every slot names its memory, so one unit can keep small host-side values
-/// beside buffers on one or more devices.
+/// Each slot specifies its memory, allowing a unit to combine small host
+/// values with buffers on one or more devices.
 ///
-/// Decide: a device is numbered within the unit, and the runtime chooses which
-/// physical device each number means. Whether a description may instead name
-/// a physical device is not settled.
+/// Decide: device indices are local to a unit and mapped to physical devices
+/// by the runtime. Whether a description may identify a physical device
+/// directly remains unresolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Memory {
     /// Ordinary memory of the host process.
@@ -605,51 +565,49 @@ pub enum Memory {
     Device(u32),
 }
 
-/// One entry in a unit's storage table.
+/// An index into a unit's storage table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot(pub u32);
 
-/// How many elements a slot must be able to hold: the product of the counts
-/// of these shape values. Empty means one element. Each is a length or a
-/// domain, since presence counts nothing.
+/// A slot's required element capacity: the product of the counts represented
+/// by these lengths and domains. An empty product denotes one element.
+/// Presence is not a count and cannot contribute to capacity.
 ///
-/// What the code writes must fit. That is an obligation on the code. The
-/// check cannot establish it, and the runtime is not required to read a
-/// shape value in order to verify it.
+/// Compiled writes must fit the declared capacity. Description checks cannot
+/// establish this obligation, and the runtime is not required to read shape
+/// values to verify it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capacity(pub Vec<ShapeEntry>);
 
-/// What storage a slot needs: which memory, the bytes of one element, which
-/// are fixed at compile time, and how many elements.
+/// A slot's storage requirements: memory, fixed element size and element
+/// capacity.
 ///
-/// A unit never states the bytes of an allocation, and it never asks for
-/// storage at all: this description is the request. The runtime provides a
-/// [`Region`] before the stage that first writes the slot. That makes the
-/// runtime a consumer of every shape value the capacity names, and of no
-/// others.
+/// The description declares storage requirements; compiled code does not
+/// request allocations. The runtime derives allocation sizes and supplies a
+/// [`Region`] before the first stage that writes the slot. This operation
+/// consumes exactly the shape values named by the capacity.
 #[derive(Clone, Debug)]
 pub struct Need {
     pub memory: Memory,
-    /// The bytes of one element.
+    /// Element size in bytes.
     pub element_bytes: u32,
-    /// The alignment the start of the storage must have, in bytes.
+    /// Required alignment of the storage start, in bytes.
     pub align: u32,
-    /// Every shape value here is produced before the stage that first writes
-    /// the slot.
+    /// Capacity dependencies must be produced before the first stage that
+    /// writes the slot.
     pub capacity: Capacity,
 }
 
-/// The storage a slot is given at run time: part or all of an allocation,
-/// passed to a stage as a base and an offset from that base. A whole
-/// allocation is the case where the offset is zero.
+/// Storage assigned to a slot at run time, represented by an allocation base
+/// and a byte offset. A whole allocation has offset zero.
 ///
-/// The region starts where the slot's alignment allows and holds the stated
-/// capacity. Code may not assume that a slot begins an allocation or that
-/// two slots lie in different ones, and it reads and writes nothing outside
-/// the regions it was given. The regions of different slots do not overlap,
-/// except where one slot is an alias.
+/// A region satisfies the slot's alignment and capacity requirements. Code
+/// must access only its assigned regions and may assume neither that a region
+/// starts at its allocation base nor that distinct slots occupy distinct
+/// allocations. Regions for distinct slots do not overlap except through
+/// aliases.
 ///
-/// Gap: what a base is differs by target and is not written.
+/// Gap: the target-specific representation of a base is unspecified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region<Base> {
     pub base: Base,
@@ -657,31 +615,29 @@ pub struct Region<Base> {
     pub offset: u64,
 }
 
-/// What each slot is for. This decides who may write it.
+/// A slot's role and write ownership.
 #[derive(Clone, Debug)]
 pub enum Storage {
-    /// A plane of an input value: the memory, the bytes of one element and
-    /// the number of elements the unit expects to find. Never written.
+    /// An input plane with declared memory, element size and capacity. The
+    /// unit cannot write it.
     Input(Need),
-    /// A plane of a result. Written by this unit, then handed to the runtime.
+    /// A result plane written by the unit and transferred to the runtime.
     Output(Need),
-    /// A plane of a computed result that is an input plane unchanged. Shares
-    /// its storage. A result that is a whole input value is a `Selection`.
+    /// A result plane sharing an unchanged input plane's storage. A whole
+    /// input value returned unchanged is represented by `Selection`.
     Alias(Slot),
-    /// Private to one run of the unit. It has no identity outside it.
+    /// Storage private to one execution of the unit, with no external
+    /// identity.
     Scratch(Need),
 }
 
-/// One value a unit takes in: the value of a node, with its kind, its
-/// layout, its shape and the storage that holds it.
+/// A unit input identified by node, kind, layout, shape and storage.
 ///
-/// The kind says what the value is and the layout says how it is kept. The
-/// layout must lay out that kind, and the port gives one shape value for each
-/// run-time fact of the kind and one slot for each plane of the layout.
+/// The layout must represent the kind. The port supplies one shape value per
+/// shape field in kind order and one slot per layout plane.
 ///
-/// Decide: a value is bound to a port only if their layouts are identical.
-/// Converting between layouts would be an explicit computation, never
-/// something the runtime does silently while binding.
+/// Decide: binding requires identical layouts. Any layout conversion would be
+/// an explicit computation, never an implicit operation during binding.
 #[derive(Clone, Debug)]
 pub struct InputPort {
     /// The node whose value this is.
@@ -692,13 +648,13 @@ pub struct InputPort {
     pub layout: LayoutRef,
     /// One entry per shape field of the kind, in the kind's order.
     pub shape: Vec<ShapeEntry>,
-    /// The slots that hold the value, one for each plane of the layout. No
-    /// two planes of one value share storage.
+    /// One storage slot per layout plane. Distinct planes of one value cannot
+    /// share storage.
     pub planes: Vec<Slot>,
 }
 
-/// One value a unit computes: the result that meets one demand. Its kind,
-/// layout, shape and planes are stated as for an [`InputPort`].
+/// A computed result satisfying one demand. Kind, layout, shape and storage
+/// are specified as for an [`InputPort`].
 #[derive(Clone, Debug)]
 pub struct OutputPort {
     /// The demand this result meets.
@@ -709,165 +665,146 @@ pub struct OutputPort {
     pub planes: Vec<Slot>,
 }
 
-/// A result that is one of the unit's inputs, unchanged.
+/// An input returned unchanged, including its shape, layout and storage.
+/// Selection performs no computation or copying.
 ///
-/// The result is the value itself: its shape, its layout and its storage.
-/// Nothing is computed and nothing is copied.
+/// Without `otherwise`, the result is `first`, as when returning a State's
+/// current value.
 ///
-/// With no `otherwise`, the result is the input `first`. This is how a unit
-/// answers with a State as it stands.
+/// With `otherwise`, `first` must be Optional. If present, its inner value is
+/// returned; otherwise the fallback input is returned. The runtime selects by
+/// consuming the presence of `first`. Both alternatives must have the same
+/// layout, but may have different shapes; the result retains the selected
+/// shape.
 ///
-/// With an `otherwise`, `first` is an Optional input. When it is present the
-/// result is what it holds, and when it is absent the result is the input
-/// `otherwise`. The runtime makes the choice, which makes it a consumer of
-/// the presence of `first`. The two must be kept the same way, so the result
-/// has one layout whichever is chosen. They need not have the same shape:
-/// the result has the shape of the one chosen.
+/// An input used only as a selection fallback is required only if some
+/// selection chooses it. The runtime need not hold that input while every
+/// relevant Optional is present.
 ///
-/// An input that the unit uses only as the `otherwise` of selections is
-/// needed only when one of them would choose it. While the Optional input is
-/// present the runtime need not hold it at all.
-///
-/// Gap: choosing on a device, or demanding the fallback conditionally there,
-/// is not designed.
+/// Gap: device-side selection and conditional demand for its fallback are
+/// unspecified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     /// The demand this result meets.
     pub demand: Demand,
     /// A reference into the unit's table of kinds.
     pub kind: KindRef,
-    /// Which input is chosen: always, or when it is present.
+    /// The input selected unconditionally or when present.
     pub first: u32,
-    /// Which input is chosen when `first` is absent.
+    /// The fallback input selected when `first` is absent.
     pub otherwise: Option<u32>,
 }
 
-/// One compiled computation: an entry point in the code. A stage is one
-/// launch. The runtime starts it, and it runs to completion without the
-/// runtime. A stage is the only execution boundary in this contract.
+/// A compiled entry point invoked in one launch. A stage is the sole
+/// execution boundary in this contract: the runtime launches it, and it runs
+/// to completion without calling the runtime.
 ///
-/// A stage is given what it consumes and the storage it writes. It computes
-/// and produces results: what it writes, and the shape values it determines.
-/// Compiled code never calls the runtime. Everything a stage needs is
-/// provided before it runs, and whenever the runtime must act, it acts
-/// between stages. All providing of storage, and any waiting for it, is the
-/// runtime's.
-///
-/// The runtime starts every stage, and between two stages it need do nothing
-/// more. It provides storage first only if the next stage writes storage not
-/// yet provided, and it waits for an earlier stage only if it must itself
-/// read something that stage produced. Computations that can run as one
-/// launch may be one stage; nothing requires it.
-///
-/// A stage consumes only what was produced before it, by the values bound to
-/// inputs or by earlier stages. That holds for shape values exactly as it
-/// holds for storage.
-///
-/// No value takes its shape from its own contents. The shape of a result may
-/// depend on data, but only on data computed before the result is filled. A
-/// stage that writes part of a result uses the shape values that govern that
-/// part, so it cannot be the stage that determines them. One stage
-/// determines, and a later stage fills.
-///
-/// For fixed code, what a stage produces depends only on what it consumes,
-/// and its description lists all of that. A stage that depends on what
-/// storage held before the stage wrote it lists that storage among what it
-/// reads. A runtime that holds a shape value produced from the same consumed
-/// values may use it without waiting for the stage to produce it again. That
-/// does not by itself let the runtime leave the stage out, since whatever
-/// else the stage writes is still owed. Where everything a stage produces is
-/// already held and valid, the stage need not run. How a runtime knows that
-/// consumed values are unchanged is its own business. Treating any write as
-/// a change is always sound.
-///
-/// Stages are listed in an order in which they can run. The runtime owns the
-/// order of execution. It may run stages in another order, or overlapped,
-/// only where each still finds in storage, and in the shape values it uses,
-/// what list order would have given it.
-///
-/// A stage has no failure to report. Cartan is total, so compiled code always
-/// runs to completion and every outcome it computes is an ordinary value. A
-/// run can still end early, but only for reasons the runtime discovers, such
-/// as being unable to provide storage or being cancelled, and only between
+/// Before launch, the runtime supplies consumed values and writable storage.
+/// The stage produces storage contents and shape values. Runtime actions,
+/// including storage provision and any associated waiting, occur between
 /// stages.
 ///
-/// A stage may do any amount of work, including several updates, as long as it
-/// needs nothing from the runtime while it runs. Where repetition happens is
-/// not part of this contract.
+/// Launching consecutive stages need not require additional runtime work.
+/// Storage is provided only when the next stage writes a slot not yet
+/// provisioned. The runtime waits for an earlier stage only when it must
+/// itself read a result of that stage. Computations that fit in one launch
+/// may, but need not, form one stage.
 ///
-/// Each slot is passed to a stage as a [`Region`].
+/// A stage consumes only values produced by bound inputs or earlier stages.
+/// This rule applies equally to storage contents and shape values.
 ///
-/// Gap: nothing says where a stage runs. The code is emitted for one target,
-/// so a stage whose inputs are all available on the host cannot be placed
-/// there.
+/// A result's shape may depend on previously computed data, but never on its
+/// own contents. A stage writing part of a result consumes the shape values
+/// governing that part and cannot also determine them. Shape determination
+/// precedes filling in a later stage.
 ///
-/// Gap: which of the shape values a stage uses set the extent it is
-/// dispatched over is not stated.
+/// For fixed code, a stage's results depend only on what it consumes, all of
+/// which its description declares. Storage whose previous contents affect
+/// the result must appear among the stage's reads. A runtime may reuse a
+/// shape value produced from unchanged consumed values without
+/// waiting for it to be produced again. Other writes remain required; the
+/// entire stage may be omitted only when all its outputs are already
+/// available and valid. Change detection is a runtime implementation choice.
+/// Treating every write as a change is sound.
 ///
-/// How a stage receives its slots and shape values is written for
-/// WebAssembly, on [`Code::Wasm`], as a [`Frame`].
+/// The stage list specifies a valid execution order. The runtime may reorder
+/// or overlap stages only if each receives the storage contents and shape
+/// values that list order would provide.
 ///
-/// Gap: the calling convention of a stage on the other targets is not written
-/// yet.
+/// A stage reports no failure. Cartan is total: compiled code completes and
+/// represents every computed outcome as an ordinary value. Early termination
+/// is limited to runtime-detected conditions, such as storage shortage or
+/// cancellation, and occurs between stages.
+///
+/// A stage may perform any amount of work, including several updates,
+/// provided it requires no runtime intervention. The location of repetition
+/// is unspecified.
+///
+/// Each slot is passed as a [`Region`].
+///
+/// Gap: stage placement is unspecified. Code targets one backend, so a stage
+/// whose inputs are all host-available cannot be placed on the host.
+///
+/// Gap: the relationship between consumed shape values and dispatch extent is
+/// unspecified.
+///
+/// The WebAssembly calling convention passes slots and shape values through a
+/// [`Frame`], as specified by [`Code::Wasm`].
+///
+/// Gap: stage calling conventions for other targets are unspecified.
 #[derive(Clone, Debug, Default)]
 pub struct Stage {
-    /// The name of this stage's entry in the code.
+    /// The stage's entry-point name.
     pub entry: String,
     /// Storage this stage reads.
     pub reads: Vec<Slot>,
     /// Storage this stage writes.
     pub writes: Vec<Slot>,
-    /// Shape values this stage consumes. This declares a dependency. It does
-    /// not require the code to load the value, and it does not by itself
-    /// require the runtime to read it.
+    /// Consumed shape values. These declare dependencies without requiring a
+    /// machine load or, by themselves, a runtime read.
     pub uses: Vec<ShapeRef>,
     /// Shape values this stage produces.
     pub determines: Vec<ShapeRef>,
 }
 
-/// Everything the runtime needs to know to run a piece of compiled code.
+/// A compiled computation's runtime description.
 ///
-/// A unit is a description, not an execution boundary. It is the scope in
-/// which storage, shape values, kinds and layouts are stated once, and it
-/// says which results meet which demands. Its stages are what runs. One rule
-/// holds inside a unit and between units: whatever is consumed was produced
-/// first, by a stage or by whatever produced the value bound to an input.
+/// A unit defines a shared namespace for storage, shape values, kinds and
+/// layouts, and maps results to demands. Execution occurs at its stages.
+/// Within and between units, every consumed value must first be produced by a
+/// stage or supplied through a bound input.
 ///
-/// A unit's results are a function of its inputs and of nothing else.
+/// Results depend only on inputs. A unit supplies values at requested sites
+/// of indexed values. Inputs and results reside in memory, but may share
+/// existing storage; see `Storage::Alias`.
 ///
-/// The job of a unit is to supply values at requested sites of indexed
-/// values. The values it reads and the values it produces are held in
-/// memory. That does not require a fresh copy; see `Storage::Alias`.
+/// A value's domain is distinct from the sites requested for one execution
+/// and from those currently covered by storage. A port's domain always
+/// denotes the value's domain.
 ///
-/// A value's domain is where it has values at all. It is distinct from the
-/// sites a unit is asked to fill on one run, and from the sites that storage
-/// currently covers. A domain in a port is the value's domain.
+/// Gap: requested sites and storage coverage smaller than the whole domain
+/// are unspecified.
 ///
-/// Gap: how the sites asked for and the sites storage covers are stated,
-/// when they are not the whole domain, is not written yet.
-///
-/// There is one kind of unit. A scalar result, an Array fill, a multi-stage
-/// update and a fused kernel differ only in how many ports, slots and stages
-/// they list. A unit asked for by an update and a unit asked for by an
-/// observation are also the same kind of unit: a computation that reads named
-/// values and produces named values. Whether its results become the next State
-/// is decided by the runtime, not by anything in the unit. Producing the value
-/// of a State is not the same as writing it.
+/// Scalar results, Array fills, multi-stage updates and fused kernels use the
+/// same description, differing only in ports, slots and stages. Update and
+/// observation demands likewise request ordinary computations over named
+/// values. The runtime determines whether results become the next State;
+/// computing a State's value does not itself write the State.
 #[derive(Clone, Debug, Default)]
 pub struct Unit {
-    /// Every kind the ports use, each stated once.
+    /// Unique kind definitions used by ports.
     pub kinds: Kinds,
-    /// Every layout the ports use, each stated once.
+    /// Unique layout definitions used by ports.
     pub layouts: Layouts,
     pub inputs: Vec<InputPort>,
     /// Results the unit computes.
     pub outputs: Vec<OutputPort>,
-    /// Results that are inputs, unchanged.
+    /// Inputs returned unchanged as results.
     pub selected: Vec<Selection>,
     pub storage: Vec<Storage>,
-    /// Every shape value not fixed at compile time, each stated once.
+    /// Unique declarations of shape values not fixed at compile time.
     pub shape_fields: Vec<ShapeField>,
-    /// In list order: an order in which the stages can run.
+    /// Stages in a valid execution order.
     pub stages: Vec<Stage>,
 }
 
@@ -879,54 +816,51 @@ pub enum Target {
     Cuda,
 }
 
-/// What a stage is handed when it is launched: its regions, then its shape
-/// values, as a row of words. [`Stage::frame`] gives the frame of a stage.
+/// A stage's launch arguments as a sequence of words: regions followed by
+/// shape values. [`Stage::frame`] derives this sequence.
 ///
-/// The words come in this order: one for each slot the stage reads, one for
-/// each slot it writes, the shape values it uses, and the shape values it
-/// determines. A slot's word locates its region. A presence takes one word,
-/// zero or one. A length takes one word. A domain takes two words for each
-/// axis, the origin and then the extent.
+/// Words appear in read-slot order, write-slot order, consumed-shape order
+/// and produced-shape order. Each slot occupies one word locating its region.
+/// Presence occupies one word, either 0 or 1; length occupies one word; a
+/// domain occupies two words per axis, origin followed by extent.
 ///
-/// The runtime fills the words of the regions and of the shape values the
-/// stage uses before the launch. The stage fills the words of the shape
-/// values it determines. Where a slot or a shape value does not apply,
-/// because it lies within an Optional that is absent, its words are zero and
-/// the code must not read through them.
+/// The runtime initializes region words and consumed shape values before
+/// launch. The stage writes the shape values it determines. Words for
+/// inapplicable slots or shape fields within an absent Optional are zero, and
+/// code must not read through them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     /// The slots, in frame order. Slot `i` is at word `i`.
     pub slots: Vec<Slot>,
-    /// Each shape value with the word where it starts, in frame order.
+    /// Shape references and their starting word indices, in frame order.
     pub shapes: Vec<(ShapeRef, u32)>,
-    /// How many words the frame has.
+    /// The frame's word count.
     pub words: u32,
 }
 
-/// Target code as text or bytes. The runtime's side prepares and loads it.
+/// Target code as text or bytes, prepared and loaded on the runtime side.
 ///
-/// Gap: the bytecode format is the official code generator's own and has no
-/// public specification yet.
+/// Gap: the official code generator's bytecode format has no public
+/// specification.
 pub enum Code {
     Bytecode(Vec<u32>),
-    /// A WebAssembly module in binary form.
+    /// A binary WebAssembly module.
     ///
-    /// The module imports one linear memory, named `memory` in module `env`,
-    /// and nothing else, and it has no start function, so it cannot call
-    /// anything outside itself. Every slot of the unit is in
-    /// `Memory::Linear`, and the runtime owns and grows that memory.
+    /// The module imports only `env.memory`, a linear memory owned and grown
+    /// by the runtime, and has no start function. It therefore cannot call
+    /// external functions. All unit slots use `Memory::Linear`.
     ///
-    /// Each stage is an exported function with the stage's entry name. It
-    /// takes one 32-bit integer and returns nothing. The integer is the byte
-    /// offset in the memory of the stage's [`Frame`], whose words are 64 bits
-    /// wide and little-endian. A region's word is the byte offset of the
-    /// region in the memory.
+    /// Each stage is exported under its entry-point name as a function taking
+    /// one 32-bit integer and returning nothing. The argument is the byte
+    /// offset of its [`Frame`] in linear memory. Frame words are 64-bit
+    /// little-endian values; each region word is the region's byte offset in
+    /// that memory.
     Wasm(Vec<u8>),
     Metal(String),
     Cuda(String),
 }
 
-/// One port of a unit, by its place among the inputs or the results.
+/// A port index within a unit's inputs, computed outputs or selections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortRef {
     Input(u32),
@@ -934,19 +868,18 @@ pub enum PortRef {
     Selected(u32),
 }
 
-/// Why a unit description is not well formed.
+/// A structural defect in a unit description.
 ///
-/// A defect is a mistake by whoever wrote the description, which is a code
-/// generator. It is never an error in a program, and it never happens during
-/// a run: a supplier meets it when it checks a description, before anything
-/// reaches the runtime.
+/// Defects are errors in the code generator's description, not errors in the
+/// source program or runtime outcomes. The supplier detects them when
+/// checking a description before passing it to the runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Defect {
     UnknownSlot(Slot),
     UnknownShapeField(ShapeRef),
-    /// A stage uses a shape value, or writes storage whose capacity names
-    /// one, that nothing before it produces. A stage cannot produce what it
-    /// consumes, so it cannot give a result it is filling its shape.
+    /// A consumed shape value, or one required by writable storage capacity,
+    /// has no earlier producer. A stage cannot determine a shape value that
+    /// governs the result it is filling.
     ShapeNotYetKnown {
         stage: u32,
         field: ShapeRef,
@@ -981,120 +914,112 @@ pub enum Defect {
     UnknownKind(PortRef),
     /// A port refers to a layout that is not in the unit's table.
     UnknownLayout(PortRef),
-    /// A port does not match its kind: its layout does not lay out that
-    /// kind, it gives the wrong number of shape values or of slots, or a
-    /// shape value is of the wrong sort.
+    /// A port's layout, shape fields or plane count does not match its kind.
+    /// This includes shape values of the wrong category.
     KindMismatch(PortRef),
     /// A selection names an input the unit does not have.
     UnknownInput(PortRef),
-    /// A storage capacity is stated as presence, which counts nothing.
+    /// A capacity uses presence, which is not an element count.
     CapacityNotACount(Slot),
     /// Two planes of one value are given the same storage.
     PlaneRepeated {
         port: PortRef,
         plane: Plane,
     },
-    /// A plane's layout spans more bytes than one element of its storage
-    /// holds.
+    /// A plane's layout exceeds its storage element size.
     OutsideElement {
         port: PortRef,
         plane: Plane,
     },
-    /// Parts of a value with different shape values are placed in one
-    /// plane. A plane holds one run of elements, so everything in it shares
-    /// one domain and one presence.
+    /// Parts governed by different shape values share one plane. A plane's
+    /// elements must share a domain and presence.
     PlaneSharedAcrossParts {
         port: PortRef,
         plane: Plane,
     },
 }
 
-/// A description that these contracts cannot carry yet: the kind of a port
-/// includes a fiber whose storage is not described.
+/// A port kind containing a fiber whose storage representation is
+/// unspecified.
 ///
-/// This is not a defect. The kind is valid, and a correct program can have
-/// it. A supplier reports this as not supported yet, not as a mistake of its
-/// own. Checking stops at the first such port, so the rest of the
-/// description has not been checked.
+/// The kind is valid, so this is an unsupported capability rather than a
+/// defect in the description. Checking stops at the first unsupported port;
+/// the remaining description is not checked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unsupported {
-    /// The port whose kind cannot be carried.
+    /// The port with an unsupported kind.
     pub port: PortRef,
 }
 
-/// Why [`Unit::check`] did not accept a description.
+/// The reason [`Unit::check`] rejected a description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The description is not well formed.
     Defect(Defect),
-    /// The description cannot be carried yet.
+    /// The description uses an unsupported representation.
     Unsupported(Unsupported),
 }
 
-/// A unit description that passed [`Unit::check`].
+/// A unit description validated by [`Unit::check`]. The private fields ensure
+/// that construction requires these checks.
 ///
-/// The field is private, so holding one is proof the description passed these
-/// checks. The tables of kinds and of layouts are well formed and state each
-/// entry once. Every slot and shape field named exists. Each port's kind has
-/// its storage described, its layout lays out that kind, and it gives one
-/// shape value for each run-time fact and one slot for each plane. A
-/// selection chooses among inputs of the right kinds that are kept one way. No
-/// two planes of a value share storage, and each plane's layout fits inside
-/// one element of its storage. No capacity is stated as presence. No stage
-/// writes an input or an alias, and an alias refers to an input. Each shape
-/// value has at most one producer. A stage uses only what was produced
-/// before it, and a stage that writes part of a result uses the shape values
-/// that govern that part. Every shape value a capacity names is produced
-/// before the stage that first writes the storage. Every shape value of a
-/// result has a producer, except those of a part fixed as absent, which do
-/// not apply.
+/// Kind and layout tables are well formed and contain unique definitions. All
+/// referenced slots and shape fields exist. Each port has a supported kind, a
+/// compatible layout, one shape value per shape field and one slot per plane.
+/// Selections use compatible input kinds with identical layouts.
 ///
-/// Passing these checks does not make a unit ready to run. They do not show
-/// that every result is written by some stage, that storage is read only
-/// after something wrote it, that what the code writes fits the capacity
-/// stated for it, or that an alignment is usable, and they cannot show that
-/// the code honors the description. They establish an order within the
-/// description. They say nothing about where a shape value is at run time
-/// or whether the work that produces it has completed.
+/// Each value's planes use distinct storage, and each plane fits within its
+/// storage element size. Capacities contain no presence fields. Stages cannot
+/// write inputs or aliases; aliases reference inputs.
 ///
-/// Decide: how far the runtime trusts code from a supplier it did not build.
-/// Nothing in this contract confines code to the storage it declared.
+/// Shape values have at most one producer and are consumed only after that
+/// producer. A stage writing part of a result declares the shape values
+/// governing that part. Capacity dependencies precede the first write to
+/// their storage. Every result shape field has a producer unless it belongs
+/// to a part fixed as absent.
+///
+/// Validation alone does not establish readiness to execute. It does not
+/// verify that every result is written, that storage reads follow writes,
+/// that writes fit declared capacity, that alignments are usable, or that
+/// code follows its description. It establishes declared ordering, not
+/// runtime location or completion of shape production.
+///
+/// Decide: the trust required for externally supplied code is unresolved.
+/// This contract does not confine code to its declared storage.
 #[derive(Clone, Debug)]
 pub struct Checked {
     unit: Unit,
     governs: Vec<Vec<ShapeRef>>,
 }
 
-/// What fixes a shape value. Each shape value has exactly one.
+/// The unique producer of a shape value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Producer {
-    /// It comes with the value bound to this input. Where several inputs
-    /// refer to one shape value, this is the first of them.
+    /// The input supplying this shape value. If several inputs share the
+    /// reference, this identifies the first.
     Input(u32),
     /// This stage determines it.
     Stage(u32),
 }
 
-/// Something that depends on a shape value. A shape value may have any
-/// number.
+/// A declared consumer of a shape value. A shape value may have any number of
+/// consumers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Consumer {
     /// This stage uses it.
     Stage(u32),
-    /// The capacity of this storage names it, so the runtime consumes it to
-    /// provide the storage.
+    /// Storage whose capacity requires the runtime to consume this shape
+    /// value.
     Capacity(Slot),
     /// This computed result has it.
     Result(u32),
-    /// The runtime chooses this selection by it.
+    /// A selection whose choice depends on this shape value.
     Selection(u32),
 }
 
 // ===========================================================================
-// Supply: what a compiler offers a runtime
+// Supply: compiler services for the runtime
 // ===========================================================================
-//
-// What a compiler front half supplies to the runtime.
 
 /// A checked unit description and the target code it describes.
 pub struct Emitted {
@@ -1102,57 +1027,47 @@ pub struct Emitted {
     pub code: Code,
 }
 
-/// The front half of a compiler, as the runtime sees it.
+/// The compiler interface consumed by the runtime.
 ///
-/// The runtime needs nothing else from a compiler: no syntax tree, no semantic
-/// graph and no knowledge of how the code was generated. Two suppliers that
-/// honor this contract are interchangeable to the runtime.
+/// The runtime requires no syntax tree, semantic graph or knowledge of code
+/// generation. Suppliers satisfying this contract are interchangeable.
 ///
-/// The runtime demands what is to be computed and the supplier compiles it.
-/// Every demand is met by the same kind of computation: read values, produce
-/// values. What the runtime then does with the results is its own business
-/// and no part of the demand. It makes the first State from every State's
-/// initial value. It commits an update by taking the new values of all the
-/// States the block writes together. It reports an observation from the
-/// values of the nodes it was asked for.
+/// The runtime requests computations through demands; the supplier returns
+/// code that reads and produces values. Result use is independent of the
+/// demand: initial values establish the first State, update results replace
+/// the written States atomically, and requested node values supply
+/// observations.
 ///
-/// An input port may be a derived value. The supplier chooses, value by
-/// value, between computing it inside the unit and having it computed once
-/// and passed in. This is the same kind of choice as fusing or separating the
-/// steps within a unit, made at the unit's edge. When a unit lists a derived
-/// value as an input, the runtime must hold that value first, demanding it if
-/// it does not. The one exception is an input a unit uses only as the
-/// fallback of a selection: it is needed only when it would be chosen.
-/// Because a derived value is identified by what it computes, a value one
-/// unit produces and another takes in is the same node in both, whether or
-/// not the source names it.
+/// For each derived value, the supplier chooses between computation inside a
+/// unit and a precomputed input. This extends the choice between fused and
+/// separate computations across the unit boundary. The runtime must obtain
+/// derived inputs before use, requesting them when necessary. An input used
+/// only as a selection fallback is required only when selected. Computation
+/// identity links a derived result in one unit to the same node in another,
+/// independently of source naming.
 ///
-/// Every value is the value of something at one definite version. A unit is
-/// compiled once and says nothing about versions: the runtime runs it for a
-/// version by binding its inputs to the values of that version, and the
-/// results are the values at that version. A derived value computed to feed another
-/// unit is therefore computed for the version that unit reads. Version zero
-/// exists before any update, since every State has an initial value, so a
-/// derived value can be computed before anything else has happened.
+/// Values belong to definite versions. A compiled unit is
+/// version-independent; the runtime binds inputs for the required version and
+/// obtains results for that version. Derived inputs must therefore be
+/// computed for the version their consumer reads. Initial State values
+/// establish version zero before any update, allowing derived values to be
+/// computed at that version.
 ///
-/// A unit's results depend on nothing but its inputs. A value computed at
-/// one version is the value at every later version at which nothing it
-/// depends on has changed, where what it depends on runs through any
-/// derived values down to States and Params. The runtime may keep a computed value
-/// and use it again on that basis; once computed, it never has to be
-/// computed again to a different result. How the runtime notices that
-/// something has changed is its own business.
+/// A computed value remains valid at later versions while all its
+/// dependencies are unchanged, including dependencies through derived values
+/// down to States and Params. The runtime may retain and reuse it on that
+/// basis. For unchanged dependencies, recomputation cannot produce a
+/// different result. Change detection is a runtime implementation choice.
 ///
-/// A demand may be made at any time, including while units the supplier
-/// produced earlier are running. Producing a new unit never disturbs code
-/// already running or values already computed. The runtime owes values for
-/// the latest version and may skip computing them for versions in between.
+/// Demands may arrive while previously supplied units execute. Producing a
+/// new unit must preserve running code and existing values. The runtime must
+/// supply values for the latest version but may omit intermediate versions.
 pub trait Supplier {
     type Diagnostic;
 
     fn program(&self) -> &Program;
 
-    /// One unit that meets every demand, for one target.
+    /// Compile one unit satisfying all demands for the specified target.
     fn unit(&self, demands: &[Demand], target: Target) -> Result<Emitted, Self::Diagnostic>;
 
     /// The inspection commands this supplier offers.
@@ -1160,8 +1075,7 @@ pub trait Supplier {
         Vec::new()
     }
 
-    /// Run one inspection command, or nothing if this supplier has no such
-    /// command.
+    /// Run an inspection, returning `None` if the command is unavailable.
     fn inspect(
         &self,
         component: &str,
@@ -1173,27 +1087,26 @@ pub trait Supplier {
     }
 }
 
-/// One command a supplier offers for looking inside it during development.
+/// A supplier-provided development inspection command.
 ///
-/// A runtime's interactive session lists these beside its own and runs them
-/// by name, so the runtime never has to know what the supplier is built
-/// from. An inspection reads and never changes anything. Nothing but an
-/// interactive session calls one: they are not a way for components to use
-/// each other.
+/// An interactive runtime session lists and invokes these commands by name
+/// without depending on the supplier's internal components. Inspections are
+/// read-only and are called only by interactive sessions; they are not
+/// service interfaces between components.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inspection {
     /// The component the command belongs to, such as `compiler` or `syntax`.
     pub component: String,
-    /// What it shows, such as `unit` or `tree`.
+    /// The inspection view, such as `unit` or `tree`.
     pub view: String,
-    /// The arguments it takes, as a usage line. Empty if it takes none.
+    /// An argument usage line, empty for commands without arguments.
     pub arguments: String,
-    /// One line saying what it shows.
+    /// A one-line description of the view.
     pub summary: String,
 }
 
-/// What an inspection returns: structured data. Whoever prints it decides
-/// how; an inspection never formats text for display.
+/// Structured inspection output. Presentation belongs to the caller;
+/// inspections do not format display text.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Report {
     Text(String),
@@ -1206,75 +1119,72 @@ pub enum Report {
 }
 
 // ===========================================================================
-// Sessions: what an application asks of a runtime
+// Sessions: application interaction with the runtime
 // ===========================================================================
 //
-// What an application asks of the runtime, and what the runtime reports back.
+// The runtime owns each run and its storage. Several atomic updates may
+// complete between publications. Each update produces the next State; only
+// publication makes a State externally visible.
 //
-// The runtime owns a run and its storage. A run may complete many atomic
-// updates between publications: each update produces the next State, but a
-// State becomes visible to anything outside the run only when it is
-// published. Compiled computations supply the transitions and the decisions
-// about cadence and stopping. Publication exposes one immutable, complete
-// State with its version and the Params it was computed with. A required
-// observation may hold back advancement until it is taken; optional
-// rendering may not. Where the repetition of updates executes is not
-// specified.
+// Compiled computations supply transitions and cadence and stopping
+// decisions. Publication exposes a complete immutable State with its version
+// and the Params used to compute it. Required observations may delay
+// advancement; optional rendering may not. The location of the update loop is
+// unspecified.
 
-/// One State of a running program. Each completed update makes the next,
-/// whether or not it is published.
+/// A State version within a run. Every completed update advances the version,
+/// independently of publication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version(pub u64);
 
-/// Why a run ended without a result. None of these publish anything.
+/// A runtime-detected reason for ending a run without a result or
+/// publication.
 ///
-/// None is a failure of the program. Cartan is total: compiled code always
-/// completes, and an error-looking result is an ordinary value. Every stop is
-/// something the runtime discovers.
+/// These conditions are distinct from program results. Cartan is total:
+/// compiled code completes, and outcomes representing errors remain ordinary
+/// values.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stop {
-    /// The runtime could not provide storage within the memory limit. It
-    /// finds this out because it handles every allocation.
+    /// The runtime could not provide storage within its memory limit.
+    /// Allocation is entirely runtime-owned.
     Shortage,
     Cancelled,
     /// An input was missing or did not match the unit's declared port.
     Binding(Node),
-    /// The unit names a memory this runtime has not set up.
+    /// The unit references memory not configured by this runtime.
     Unplaced(Memory),
-    /// The code did not do what its own description says, such as never
-    /// producing a shape value it determines. This is a defect in a code
-    /// generator, not a run-time outcome of the program.
+    /// Compiled code violated its description, for example by failing to
+    /// produce a declared shape value. This is a code generator defect, not a
+    /// program outcome.
     Invariant,
     /// A device or its driver failed.
     Device,
 }
 
-/// One run: one execution of a program by a runtime, from its first State
-/// onward, as an application drives it.
+/// An application-driven program execution from its initial State onward.
 ///
-/// A session coordinates a supplier and the runtime. It is not another
-/// evaluator, and nothing outside the runtime writes State.
+/// A session coordinates the supplier and runtime without evaluating the
+/// language. Only the runtime writes State.
 ///
-/// Gap: this is a placeholder and its methods are provisional. Starting a run,
-/// parameters, how publication is requested or offered, delivery of results
-/// and stopping conditions are not written yet. `advance` states a number of
-/// updates, not how they are run or which update block runs when there are
-/// several. `observe` does not say which State and Params its values belong
-/// to. Both report with `Stop`, which is why a run ended; a request that is
-/// refused, or that cannot be compiled, need not end the run and has no
-/// result type of its own yet.
+/// Gap: this interface is provisional. Run initialization, parameters,
+/// publication requests and offers, result delivery and stopping conditions
+/// are unspecified. `advance` gives an update count without defining
+/// execution policy or selection among update blocks. `observe` does not
+/// identify the State and Params associated with its results. Both methods
+/// return `Stop`, although refusal or compilation failure need not terminate
+/// a run and has no separate result type yet.
 pub trait Session {
-    /// A retained value: one the runtime keeps after the stages that
-    /// produced it have finished, with its shape values. Reading its bytes
-    /// back is a separate, explicit step.
+    /// A value retained by the runtime, with its shape values, after its
+    /// producing stages complete. Byte readback is a separate, explicit
+    /// operation.
     type Value;
 
-    /// Complete this many updates and report the version reached.
+    /// Complete the requested number of updates and return the resulting
+    /// version.
     ///
-    /// A handshake is the blocking round trip in which a runtime waits for
-    /// one update to finish and accepts it before it starts the next. The
-    /// word has no other meaning. Asking for several updates at once is what
-    /// lets a runtime avoid a handshake on every update.
+    /// A handshake is a blocking round trip that completes and accepts one
+    /// update before starting the next. Requesting several updates together
+    /// allows the runtime to avoid a handshake for each update.
     fn advance(&mut self, updates: u64) -> Result<Version, Stop>;
 
     fn observe(&mut self, nodes: &[Node]) -> Result<Vec<(Node, Self::Value)>, Stop>;
@@ -1288,14 +1198,14 @@ pub trait Session {
 
 /// A parsed document or expression with source locations.
 ///
-/// Gap: this is a placeholder for the tree the syntax component already
-/// publishes. The parts of it Graph relies on are not listed yet.
+/// Gap: this placeholder represents the syntax component's published tree.
+/// The portions required by Graph remain unspecified.
 #[cfg(feature = "pipeline")]
 pub struct SyntaxTree {
     _private: (),
 }
 
-/// Parse text. Problems are diagnostics carried in the tree, not a failure.
+/// Parse source text, retaining diagnostics in the resulting tree.
 #[cfg(feature = "pipeline")]
 pub trait Parse {
     fn parse_document(&self, source: &str) -> SyntaxTree;
@@ -1307,73 +1217,69 @@ pub trait Parse {
 //
 // Source meaning: names, types, dependencies and the normalized computation.
 
-/// A resolved, typed program. Documents and libraries are supplied by the
-/// caller; Graph reads no files.
+/// A resolved, typed program. The caller supplies documents and libraries;
+/// Graph performs no file reads.
 ///
-/// Gap: this is a placeholder. What Codegen and Compile may ask of an
-/// analysis is not written yet.
+/// Gap: this is a placeholder. The analysis interface available to Codegen
+/// and Compile is unspecified.
 #[cfg(feature = "pipeline")]
 pub struct Analysis {
     _private: (),
 }
 
-/// How one indexed value of a computation is held.
+/// The backing of an indexed value.
 ///
-/// An indexed value is a domain and a rule giving the value at each site. Its
-/// kind does not say whether its values are kept in memory. That is a fusion
-/// decision.
+/// An indexed value consists of a domain and a rule assigning a value to each
+/// site. Its kind does not determine storage; that is a fusion decision.
 ///
-/// These two are not required to be the only backings. A value read from
-/// storage at some sites and computed by its rule at the others is neither
-/// designed here nor excluded.
+/// These variants are not exhaustive. Mixed backing, with stored values at
+/// some sites and computed values elsewhere, is neither specified nor
+/// excluded.
 #[cfg(feature = "pipeline")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Backing {
-    /// The values are computed once into storage and read from there.
+    /// Values are computed once into storage and subsequently read.
     Stored,
-    /// The values are computed wherever they are read. Nothing is stored.
+    /// Values are computed at each use without storage.
     Lazy,
 }
 
-/// One indexed value of a computation that Graph offers a choice of backing
-/// for.
+/// An indexed value for which Graph exposes a backing choice.
 ///
-/// An Array the source names and an intermediate that only exists while a
-/// comprehension body is evaluated at one index lower the same way: each is a
-/// value at an index. Graph decides which of them are eligible to be held in
-/// storage. It does not offer every temporary, and it does not leave one out
-/// only because the source gave it no name.
+/// A named Array and an intermediate evaluated at one comprehension index
+/// both represent values at indices. Graph determines eligibility for
+/// storage: it need not offer every temporary, but cannot exclude a value
+/// solely because it is unnamed.
 ///
-/// Gap: how Graph finds candidates is not written yet.
+/// Gap: candidate discovery is unspecified.
 #[cfg(feature = "pipeline")]
 #[derive(Clone, Debug)]
 pub struct Candidate {
-    /// Which derived value it is.
+    /// The derived value's identity.
     pub value: DerivedId,
-    /// What to call it when showing a plan to a person.
+    /// A label for plan presentation.
     pub label: String,
-    /// The one backing it can have, when there is no choice. A result is
-    /// always stored. A value unbounded on some axis is never stored whole.
+    /// A required backing when no choice is available. Results are always
+    /// stored; values unbounded along an axis cannot be stored in full.
     pub forced: Option<Backing>,
 }
 
-/// One fusion plan for one request: a backing for each candidate, in the
-/// order the navigator lists them.
+/// A complete backing selection for one request, in navigator candidate
+/// order.
 ///
-/// A plan is a complete selection and can be written down and asked for
-/// directly, for example as one character per candidate. With two backings
-/// to choose from, the plans for `n` candidates are the corners of an
-/// `n`-cube. That is a way to name plans. It does not mean every corner is
-/// admissible, or that changing one candidate at a time reaches every
-/// admissible plan.
+/// A plan can be represented and requested directly, for example by one
+/// character per candidate. With two backing choices, `n` candidates define
+/// the corners of an `n`-cube. This indexing does not imply that every plan
+/// is admissible or that single-candidate changes connect all admissible
+/// plans.
 ///
-/// Decide: the order of candidates is fixed for one analyzed request. Whether
-/// a written plan still means the same thing after the source changes is not
-/// settled, so a plan is not yet something to save and replay.
+/// Decide: candidate order is fixed for an analyzed request, but stability
+/// across source changes is unresolved. Plans are not yet defined for
+/// persistence and replay.
 ///
-/// Gap: a stored value may be computed inside the computation or taken as an
-/// input from outside it. A plan does not yet say which.
+/// Gap: a stored value may be computed within the computation or supplied as
+/// an external input; the plan does not distinguish these cases.
 #[cfg(feature = "pipeline")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
@@ -1382,76 +1288,70 @@ pub struct Plan {
 
 /// A normalized computation under one fusion plan.
 ///
-/// The same type whether the request is the start of a run, an update or an
-/// observation made later. One pipeline serves all three; the request states
-/// demands and does not select a different compiler.
+/// Initialization, updates and later observations use the same representation
+/// and pipeline. Requests specify demands, not alternative compilers.
 ///
-/// An indexed computation supplies values at requested sites. Every indexed
-/// value in it is a domain and a rule for the value at each site, with the
-/// backing its plan chose. A rule is ordinary scoped computation: it may read
-/// other values at fixed offsets, at computed indices, or across a whole
-/// domain inside a reduction. A rule that is not stored is fully known when
-/// the computation is lowered and is evaluated in place wherever the value is
-/// read; it is not a value of the language and never leaves the computation.
-/// Codegen lowers the backing it is given and does not choose it.
+/// An indexed computation supplies values at requested sites. Each indexed
+/// value has a domain, a rule and the backing selected by its plan. Rules are
+/// ordinary scoped computations and may read fixed offsets, computed indices
+/// or whole domains within reductions. An unstored rule is fully known during
+/// lowering and evaluated at each use; it is neither a language value nor
+/// externally visible. Codegen implements the selected backing without
+/// choosing it.
 ///
-/// A computation's edge is the same decision one step out. An upstream
-/// binding is either an input, computed once and held by the runtime, or
-/// part of the computation. Every input and every result is stored. That
-/// does not require a fresh copy: a result may share storage that already
-/// exists and will not change.
+/// At the computation boundary, an upstream binding is either a precomputed
+/// input retained by the runtime or part of the computation itself. Inputs
+/// and results are stored, but results may share existing immutable storage.
 ///
-/// No indexed value takes its domain from its own contents. A domain may
-/// depend on data, but only on values computed before it is filled, such as
-/// a site of Ints held by an upstream Array.
+/// A value's domain may depend on data computed before filling it, such as
+/// Int values at a site of an upstream Array. It cannot depend on its own
+/// contents.
 ///
-/// Gap: an Array unbounded on some axis cannot be stored whole, yet every
-/// result is stored. Whether a finite window of one is a separate finite
-/// result or a partly stored form of the original is not settled.
+/// Gap: an Array unbounded along an axis cannot be stored in full, although
+/// every result is stored. Whether a finite window denotes a separate finite
+/// result or partial storage of the original remains unresolved.
 ///
-/// Whatever the representation becomes, it states shared structure once. A
-/// value used in several places, a rule read at several offsets and an
-/// expression that appears in both branches of a conditional each appear once
-/// and are referred to. Nothing in it may require expanding a shared thing at
-/// every use, or prevent either side from hoisting it.
+/// The representation must preserve shared structure. Values used in several
+/// places, rules evaluated at several offsets and expressions shared across
+/// conditional branches are defined once and referenced. It must neither
+/// require expansion at each use nor prevent hoisting on either side.
 ///
-/// Gap: this is a placeholder. The representation Codegen lowers from, and
-/// how a domain and a rule are written in it, are not written yet.
+/// Gap: the representation consumed by Codegen, including its domains and
+/// rules, is unspecified.
 #[cfg(feature = "pipeline")]
 pub struct Computation {
     _private: (),
 }
 
-/// Graph's offer of fusion plans for one request.
+/// Access to Graph's fusion plans for one request.
 ///
-/// Graph does not hand over one computation. It lists the candidates it
-/// exposes and turns any plan over them into a computation, or says why that
-/// plan cannot be had. A plan chooses backing only for those candidates.
-/// Choosing by hand and searching systematically are the same interface with
-/// a different chooser.
+/// The interface lists eligible candidates and maps a complete backing
+/// selection to a computation or a diagnostic. Plans select backing only for
+/// these candidates. Manual choice and systematic search use the same
+/// interface.
 ///
-/// Decide: who chooses, and whether the choice may depend on what the runtime
-/// already holds. Either way a prepared unit's inputs never change; a
-/// different plan is a different unit. A binding whose value does not change
-/// while everything it was computed from is unchanged is a candidate for an
-/// input, but not an obligation: a cheap one can stay inline. Depending on no
-/// State that one update writes is not enough to make it constant, since a
-/// Param or another update can change what it reads.
+/// Decide: the chooser and its access to runtime-held values are unresolved.
+/// A prepared unit's inputs are fixed; changing the plan produces a different
+/// unit. A binding invariant under unchanged dependencies may become an
+/// input, but inexpensive bindings may remain inline. Independence from the
+/// States written by one update does not imply constancy: Params or other
+/// updates may change its dependencies.
 #[cfg(feature = "pipeline")]
 pub trait Navigate {
     type Diagnostic;
 
-    /// The candidates, in the order a plan lists their backings.
+    /// Candidates in plan order.
     fn candidates(&self) -> &[Candidate];
 
-    /// The plan Graph proposes when nobody chooses.
+    /// Graph's default plan.
     fn start(&self) -> Plan;
 
-    /// The computation one plan describes, or why that plan is not available.
+    /// The selected computation, or a diagnostic explaining why the plan is
+    /// unavailable.
     fn computation(&self, plan: &Plan) -> Result<Computation, Self::Diagnostic>;
 }
 
-/// Resolve a source, then offer the fusion plans for what a request needs.
+/// Analyze a source and expose fusion plans for the requested demands.
 #[cfg(feature = "pipeline")]
 pub trait Analyze {
     type Diagnostic;
@@ -1478,16 +1378,14 @@ pub trait Analyze {
 //
 // Target emission: a computation becomes code and its unit description.
 
-/// Lower one computation for one target, describing the result as one `Unit`.
+/// Lower a computation to target code and its `Unit` description.
 ///
-/// Codegen chooses the physical representation: how each scalar is stored,
-/// which planes a value uses and where each part sits in them. It does not choose what the computation contains or which
-/// values are its inputs.
+/// Codegen selects scalar representations, planes and offsets. It does not
+/// select the computation or its inputs.
 ///
-/// Gap: a value is bound to a port only if their layouts are identical, yet
-/// nothing here tells Codegen the layout of a value that already exists, or
-/// asks for a conversion. Two units can agree on a kind and still disagree on
-/// its layout.
+/// Gap: binding requires identical layouts, but this interface neither
+/// communicates existing value layouts nor requests conversions. Units may
+/// agree on kind while differing in layout.
 #[cfg(feature = "pipeline")]
 pub trait Emit {
     type Diagnostic;
@@ -1501,25 +1399,24 @@ pub trait Emit {
 //
 // Immutable preparation: emitted text or bytes become loadable code.
 
-/// Prepared code with the checked unit description passed through untouched.
+/// Immutable prepared code with its checked unit description preserved.
 ///
-/// It is immutable and reusable: the same prepared code can be loaded for
-/// several devices of one architecture and run any number of times.
+/// Prepared code may be loaded on several devices of one architecture and
+/// executed repeatedly.
 ///
-/// Gap: preparation accepts any supplier's output, yet it sits in the
-/// pipeline layer, so a runtime built without that layer has no preparation
-/// contract. And `prepare` works inside a live backend context while its
-/// result is meant to be reusable across devices; whether the result is
-/// tied to that context is not said.
+/// Gap: preparation accepts any supplier's output but belongs to the pipeline
+/// layer, leaving runtimes without that feature no preparation contract.
+/// Preparation also uses a live backend context while promising reuse across
+/// devices; the result's relationship to that context is unspecified.
 #[cfg(feature = "pipeline")]
 pub struct Prepared<C> {
     unit: Checked,
     code: C,
 }
 
-/// Turn emitted text or bytes into loadable code inside an existing backend
-/// context, so a request made after launch joins the running program. It
-/// accepts any supplier's output.
+/// Convert any supplier's emitted text or bytes into loadable code within an
+/// existing backend context, allowing requests after launch to join the
+/// running program.
 #[cfg(feature = "pipeline")]
 pub trait Prepare {
     type Context;
@@ -1533,7 +1430,7 @@ pub trait Prepare {
     ) -> Result<Prepared<Self::Code>, Self::Diagnostic>;
 }
 
-// The checks that a description is well formed, and every other `impl`.
+// Well-formedness checks and all other implementations.
 mod checks;
 
 #[cfg(test)]

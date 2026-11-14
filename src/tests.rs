@@ -1,4 +1,4 @@
-//! Tests of the well-formedness checks.
+//! Tests for structural validation.
 
 mod kind {
     use crate::*;
@@ -10,7 +10,7 @@ mod kind {
             .collect()
     }
 
-    /// The kind of a value that is one fiber.
+    /// The kind corresponding to a single fiber.
     fn whole(kinds: &mut Kinds, fiber: Fiber) -> KindRef {
         let fiber = kinds.fiber(fiber);
         kinds.define(Kind::Fiber(fiber))
@@ -33,9 +33,11 @@ mod kind {
         let pair = kinds.define(Kind::Tuple(vec![mesh, mesh]));
         assert_eq!(kinds.check(), Ok(()));
 
-        // Three fibers and five kinds are stated, however deeply they nest.
+        // Nesting preserves three fiber definitions and five kind
+        // definitions.
         assert_eq!((kinds.fibers.len(), kinds.kinds.len()), (3, 5));
-        // Stating one again gives the same reference and adds nothing.
+        // Redefinition returns the existing reference without adding an
+        // entry.
         assert_eq!(kinds.fiber(Fiber::Real), real);
         assert_eq!(kinds.define(Kind::Fiber(real)), time);
         assert_eq!((kinds.fibers.len(), kinds.kinds.len()), (3, 5));
@@ -45,7 +47,7 @@ mod kind {
             kinds.scalar_counts()[pair.0 as usize],
             Some(2 * 2 * (2 + 2 + 1))
         );
-        // Every Array member keeps its own domain: eight in all.
+        // Each Array member has its own domain: eight domains in total.
         let domains = vec![ShapeField::Domain { rank: 1 }; 8];
         assert_eq!(kinds.shape_fields(pair), domains);
     }
@@ -60,9 +62,9 @@ mod kind {
         }
         assert_eq!(kinds.check(), Ok(()));
         assert_eq!(kinds.kinds.len(), 41);
-        // A million million scalars, counted without writing any out.
+        // Count 2^40 scalars without expanding their representation.
         assert_eq!(kinds.scalar_counts()[kind.0 as usize], Some(1 << 40));
-        // Comparing it with a copy in another table visits each pair once.
+        // Cross-table comparison visits each shared pair once.
         assert!(kinds.same(kind, &kinds.clone(), kind));
     }
 
@@ -82,8 +84,8 @@ mod kind {
 
     #[test]
     fn a_struct_is_not_a_product_and_a_tuple_is_not_a_vector() {
-        // An Array of Structs cannot be written at all: the element of an
-        // Array is a fiber, and a Struct is not one.
+        // The types exclude Arrays of Structs: an Array element must be a
+        // fiber.
         let mut kinds = Kinds::default();
         let real = kinds.fiber(Fiber::Real);
         let member = kinds.define(Kind::Fiber(real));
@@ -121,23 +123,23 @@ mod kind {
             names: first,
         };
         assert_eq!(itself, Err(defect));
-        // A sum needs two variants, with different names.
+        // A Sum requires at least two distinctly named variants.
         let malformed = Err(KindDefect::Malformed { at: first });
         assert_eq!(fibers(vec![Fiber::Sum(vec![variant("Only")])]), malformed);
         let twice = vec![variant("Same"), variant("Same")];
         assert_eq!(fibers(vec![Fiber::Sum(twice)]), malformed);
-        // A Vector has at least one component, over any of the fields.
+        // A Vector requires at least one component over a supported field.
         let vector = |over, count| fibers(vec![Fiber::Vector { over, count }]);
         assert_eq!(vector(Field::Rational, 3), Ok(()));
         assert_eq!(vector(Field::Complex, 3), Ok(()));
         assert_eq!(vector(Field::Real, 0), malformed);
-        // A fiber is stated once.
+        // Fiber definitions are unique.
         let defect = KindDefect::FiberStatedTwice { first, again };
         assert_eq!(fibers(vec![Fiber::Real, Fiber::Real]), Err(defect));
 
         let (first, again) = (KindRef(0), KindRef(1));
         let real = Kind::Fiber(FiberRef(0));
-        // A kind names a fiber that is in the table.
+        // Kind references must identify an existing fiber.
         let names = FiberRef(5);
         let defect = KindDefect::UnknownFiber { at: first, names };
         assert_eq!(kinds(vec![Kind::Fiber(names)]), Err(defect));
@@ -152,7 +154,7 @@ mod kind {
         let optional = Kind::Optional(first);
         let nested = kinds(vec![real.clone(), optional, Kind::Optional(again)]);
         assert_eq!(nested, Err(KindDefect::NestedOptional { at: KindRef(2) }));
-        // A kind is stated once.
+        // Kind definitions are unique.
         let defect = KindDefect::StatedTwice { first, again };
         assert_eq!(kinds(vec![real.clone(), real]), Err(defect));
     }
@@ -168,7 +170,7 @@ mod kind {
         let pose = kinds.fiber(Fiber::Product(named(&[("at", at), ("facing", facing)])));
         let [at, facing, pose] = [at, facing, pose].map(|fiber| kinds.define(Kind::Fiber(fiber)));
         assert_eq!(kinds.check(), Ok(()));
-        // The answer carries through anything built from it.
+        // Unsupported storage propagates through composite kinds.
         let counts = kinds.scalar_counts();
         assert_eq!(counts[at.0 as usize], Some(3));
         assert_eq!(counts[facing.0 as usize], None);
@@ -187,7 +189,7 @@ mod layout {
         }
     }
 
-    /// Kinds for an Array of a product holding a Real and an Int.
+    /// Kinds for an Array whose Product element contains a Real and an Int.
     fn particles() -> (Kinds, KindRef) {
         let mut kinds = Kinds::default();
         let real = kinds.fiber(Fiber::Real);
@@ -208,10 +210,10 @@ mod layout {
         let real = layouts.define(Layout::Scalar(Scalar::F64));
         let int = layouts.define(Layout::Scalar(Scalar::I32));
 
-        // Whole products side by side: both scalars in one 12-byte element.
+        // Both Product components occupy one 12-byte element.
         let whole = layouts.define(Layout::Group(vec![part(real, 0, 0), part(int, 0, 8)]));
         let whole = layouts.define(Layout::Array(whole));
-        // Each component in a plane of its own.
+        // Each component occupies a separate plane.
         let apart = layouts.define(Layout::Group(vec![part(real, 0, 0), part(int, 1, 0)]));
         let apart = layouts.define(Layout::Array(apart));
 
@@ -220,7 +222,7 @@ mod layout {
         assert!(layouts.fits(apart, &kinds, field));
         assert_eq!(measures.spans[whole.0 as usize], [(0, 12)]);
         assert_eq!(measures.spans[apart.0 as usize], [(0, 8), (0, 4)]);
-        // An Array has one fact, its domain, whichever way it is laid out.
+        // Either layout gives the Array one shape field: its domain.
         assert_eq!(measures.facts[whole.0 as usize], 1);
         assert_eq!(measures.facts[apart.0 as usize], 1);
     }
@@ -231,16 +233,16 @@ mod layout {
         let mut layouts = Layouts::default();
         let real = layouts.define(Layout::Scalar(Scalar::F64));
         let long = layouts.define(Layout::Scalar(Scalar::I64));
-        // The Real stored as an integer.
+        // Invalid integer representation of a Real.
         let wrong = layouts.define(Layout::Group(vec![part(long, 0, 0), part(long, 0, 8)]));
         let wrong = layouts.define(Layout::Array(wrong));
-        // One component missing.
+        // A missing Product component.
         let short = layouts.define(Layout::Group(vec![part(real, 0, 0)]));
         let short = layouts.define(Layout::Array(short));
         layouts.measure(8).unwrap();
         assert!(!layouts.fits(wrong, &kinds, field));
         assert!(!layouts.fits(short, &kinds, field));
-        // The element's layout without the Array around it.
+        // An element layout without the required enclosing Array.
         assert!(!layouts.fits(real, &kinds, field));
     }
 
@@ -250,7 +252,7 @@ mod layout {
         let real = Layout::Scalar(Scalar::F64);
         let at = LayoutRef(1);
 
-        // A second scalar placed four bytes into the first.
+        // The second scalar overlaps the first at a four-byte offset.
         let clash = Layout::Group(vec![part(LayoutRef(0), 0, 0), part(LayoutRef(0), 0, 4)]);
         let overlap = LayoutDefect::PartsOverlap {
             at,
@@ -259,7 +261,7 @@ mod layout {
         };
         assert_eq!(table(vec![real.clone(), clash]), Some(overlap));
 
-        // Copies of an eight-byte scalar stepping by four bytes.
+        // Eight-byte scalars overlap at a four-byte stride.
         let crowded = Layout::Repeat {
             part: LayoutRef(0),
             count: 3,
@@ -306,7 +308,7 @@ mod layout {
         });
         let array = layouts.define(Layout::Array(row));
 
-        // Two thousand scalars in each element, in four definitions.
+        // Four definitions represent two thousand scalars per element.
         assert_eq!(layouts.definitions.len(), 4);
         let measures = layouts.measure(1).unwrap();
         assert_eq!(measures.spans[array.0 as usize], [(0, 8000)]);
@@ -342,7 +344,7 @@ mod layout {
         let measures = layouts.measure(6).unwrap();
         assert!(layouts.fits(mesh_layout, &kinds, mesh));
         assert_eq!(measures.planes[mesh_layout.0 as usize], 6);
-        // Four Arrays, so four domains.
+        // Four Arrays require four domain fields.
         assert_eq!(measures.facts[mesh_layout.0 as usize], 4);
     }
 
@@ -370,7 +372,7 @@ mod layout {
         // The tag, then the Real of `Segment`, then the two Reals of `Phase`.
         let parts = vec![part(tag, 0, 0), part(scalar, 0, 4), part(pair, 0, 8)];
         let sum = layouts.define(Layout::Group(parts));
-        // The same without the tag.
+        // The same payload layout with its required tag omitted.
         let untagged = layouts.define(Layout::Group(vec![part(scalar, 0, 4), part(pair, 0, 8)]));
 
         let measures = layouts.measure(1).unwrap();
@@ -383,7 +385,7 @@ mod layout {
 mod unit {
     use crate::*;
 
-    /// The defect a check found, if it found one.
+    /// Extract a validation defect when present.
     trait Outcome {
         fn defect(self) -> Option<Defect>;
     }
@@ -425,8 +427,8 @@ mod unit {
         Storage::Output(need(element_bytes, vec![cells(4)]))
     }
 
-    /// A stage that writes the given slots, uses the given shape values and
-    /// determines the given shape values.
+    /// Construct a stage with the specified writes, shape dependencies and
+    /// shape outputs.
     fn stage(writes: &[u32], uses: &[u32], determines: &[u32]) -> Stage {
         let fields = |fields: &[u32]| fields.iter().map(|field| ShapeRef(*field)).collect();
         Stage {
@@ -476,7 +478,7 @@ mod unit {
         }
     }
 
-    /// A unit under construction: its tables, and helpers that add to them.
+    /// Unit tables with construction helpers.
     #[derive(Default)]
     struct Tables {
         kinds: Kinds,
@@ -499,7 +501,7 @@ mod unit {
             self.array(Fiber::Real, Scalar::F64)
         }
 
-        /// A port for the State, as an input or an output.
+        /// Construct an input or output State port.
         fn port<P: From<Parts>>(
             &self,
             kind: KindRef,
@@ -520,7 +522,7 @@ mod unit {
         }
     }
 
-    /// A unit with one Array of Reals as its only result, in slot 0.
+    /// A unit with one Array of Reals as its sole result, stored in slot 0.
     fn one_result(shape: ShapeEntry, capacity: ShapeEntry, stages: Vec<Stage>) -> Unit {
         let mut tables = Tables::default();
         let (kind, layout) = tables.reals();
@@ -558,22 +560,21 @@ mod unit {
             stage: 0,
             field: ShapeRef(0),
         };
-        // Nothing produces the domain.
+        // The domain has no producer.
         let never = one_result(at(0), at(0), vec![stage(&[0], &[0], &[])]);
         assert_eq!(never.check().defect(), Some(late));
-        // A stage cannot produce the capacity of storage it is writing.
+        // A stage cannot determine its own writable storage capacity.
         let same = one_result(at(0), at(0), vec![stage(&[0], &[0], &[0])]);
         assert_eq!(same.check().defect(), Some(late));
-        // One stage determines the domain and the next fills.
+        // Domain production precedes filling in a later stage.
         let stages = vec![stage(&[], &[], &[0]), stage(&[0], &[0], &[])];
         assert!(one_result(at(0), at(0), stages).check().is_ok());
 
-        // No Array takes its shape from its own contents. A stage that fills a
-        // result uses its domain, so it cannot also determine it, whatever
-        // storage it was given.
+        // A result-writing stage must consume its domain and cannot also
+        // determine it, regardless of the storage provided.
         let own = one_result(at(0), cells(100), vec![stage(&[0], &[0], &[0])]);
         assert_eq!(own.check().defect(), Some(late));
-        // Nor may it leave the domain out of what it uses.
+        // The stage must declare its domain dependency.
         let unused = Defect::GoverningShapeUnused {
             stage: 0,
             field: ShapeRef(0),
@@ -584,8 +585,8 @@ mod unit {
 
     #[test]
     fn several_ports_may_share_a_shape_value_but_it_has_one_producer() {
-        // An input Array and a Struct of two Arrays, all with the domain in
-        // shape field 0. The input produces it; nothing restates it.
+        // An input Array and two result Arrays share shape field 0. The input
+        // is the domain's sole producer.
         let shared = |stages: Vec<Stage>| {
             let mut tables = Tables::default();
             let (array, array_layout) = tables.reals();
@@ -610,18 +611,18 @@ mod unit {
         };
         assert!(shared(vec![stage(&[1, 2], &[0], &[])]).check().is_ok());
 
-        // A stage may not determine a shape value an input brings.
+        // A stage cannot redefine an input's shape value.
         let twice = Some(Defect::ShapeProducedTwice(ShapeRef(0)));
         let again = vec![stage(&[], &[], &[0]), stage(&[1, 2], &[0], &[])];
         assert_eq!(shared(again).check().defect(), twice);
-        // Nor may two stages determine one shape value.
+        // Two stages cannot produce the same shape value.
         let twice = Some(Defect::ShapeProducedTwice(ShapeRef(1)));
         let both = vec![stage(&[], &[], &[1]), stage(&[], &[], &[1])];
         assert_eq!(shared(both).check().defect(), twice);
     }
 
-    /// A unit whose only result is an Array of a Real and an Int, laid out by
-    /// the given parts in the given storage.
+    /// A unit returning an Array of Real–Int Products with the specified
+    /// layout parts and storage.
     fn particles(parts: Vec<(Scalar, u32, u32)>, storage: Vec<Storage>) -> Unit {
         let mut tables = Tables::default();
         let real = tables.kinds.fiber(Fiber::Real);
@@ -661,7 +662,7 @@ mod unit {
             .check()
             .is_ok());
 
-        // The Int placed on top of the Real.
+        // The Int overlaps the Real.
         let clash = vec![(Scalar::F64, 0, 0), (Scalar::I32, 0, 4)];
         assert!(matches!(
             particles(clash, vec![out(16)]).check().defect(),
@@ -676,11 +677,11 @@ mod unit {
             particles(together, vec![out(8)]).check().defect(),
             Some(outside)
         );
-        // A Real stored as an integer.
+        // Invalid integer representation of a Real.
         let mismatch = Some(Defect::KindMismatch(RESULT));
         let wrong = vec![(Scalar::I64, 0, 0), (Scalar::I32, 0, 8)];
         assert_eq!(particles(wrong, vec![out(16)]).check().defect(), mismatch);
-        // Two planes laid out and one slot given.
+        // Two layout planes have only one storage slot.
         let mut short = particles(apart, vec![out(8), out(4)]);
         short.outputs[0].planes.pop();
         assert_eq!(short.check().defect(), mismatch);
@@ -748,7 +749,7 @@ mod unit {
         let unit = optional(false, vec![at(0), at(1)], at(1), measure_then_fill());
         assert!(unit.check().is_ok());
 
-        // Presence counts nothing, so it cannot state how much storage to provide.
+        // Presence is not an element count and cannot determine capacity.
         let presence = ShapeEntry::Fixed(ShapeValue::Presence(true));
         let unit = optional(false, vec![at(0), at(1)], presence, measure_then_fill());
         assert_eq!(
@@ -764,12 +765,13 @@ mod unit {
 
     #[test]
     fn a_result_fixed_as_absent_owes_no_shape() {
-        // Nothing determines the domain and nothing writes the storage.
+        // The absent result needs neither a domain producer nor a storage
+        // write.
         let absent = ShapeEntry::Fixed(ShapeValue::Presence(false));
         let unit = optional(false, vec![absent, at(1)], cells(0), Vec::new());
         assert!(unit.check().is_ok());
 
-        // A result that may be present owes its domain.
+        // A potentially present result requires a domain producer.
         let unit = optional(
             false,
             vec![at(0), at(1)],
@@ -782,10 +784,9 @@ mod unit {
         );
     }
 
-    /// A unit whose only result is a Struct of two Arrays of Reals. The
-    /// first has a fixed domain and sits in plane 0; the second's domain is
-    /// shape field 0 and it sits where `second` says, as a plane and an
-    /// offset.
+    /// A unit returning a Struct of two Real Arrays. The first has a fixed
+    /// domain in plane 0. The second uses shape field 0 and the plane and
+    /// offset specified by `second`.
     fn pair(stages: Vec<Stage>, second: (u32, u32)) -> Unit {
         let mut tables = Tables::default();
         let (array, array_layout) = tables.reals();
@@ -812,7 +813,8 @@ mod unit {
 
     #[test]
     fn a_struct_may_fill_one_array_then_shape_and_fill_the_other() {
-        // Fill the first, work out the second's domain from it, fill the second.
+        // Fill the first Array, derive the second's domain, then fill the
+        // second.
         let staged = vec![
             stage(&[0], &[], &[]),
             stage(&[], &[], &[0]),
@@ -831,8 +833,7 @@ mod unit {
         };
         assert_eq!(pair(early, (1, 0)).check().defect(), Some(late));
 
-        // Two Arrays with different domains cannot be kept side by side in the
-        // elements of one plane.
+        // Arrays with different domains cannot share elements of one plane.
         let shared = Defect::PlaneSharedAcrossParts {
             port: RESULT,
             plane: Plane(0),
@@ -842,8 +843,8 @@ mod unit {
 
     #[test]
     fn every_result_sharing_storage_has_its_shape_before_it_is_written() {
-        // Two results in one slot. The first has a fixed domain; the second's
-        // is determined by the very stage that writes the slot.
+        // Two results share a slot. One has a fixed domain; the other's
+        // domain is determined by the stage writing that slot.
         let mut tables = Tables::default();
         let (kind, layout) = tables.reals();
         let fixed = tables.port(kind, layout, vec![cells(4)], &[0]);
@@ -896,7 +897,7 @@ mod unit {
             storage: vec![out(8)],
             ..tables.unit()
         };
-        // 2^40 scalars against a layout of one: refused at once.
+        // Reject 2^40 scalars against a one-scalar layout without expansion.
         assert_eq!(unit.check().defect(), Some(Defect::KindMismatch(RESULT)));
     }
 
@@ -912,15 +913,15 @@ mod unit {
         assert_eq!(domain(&[0, u64::MAX, 2]).count(), Some(0));
         assert_eq!(domain(&[u64::MAX, 2, 0]).count(), Some(0));
 
-        // Empty is not absent, and absent is not empty.
+        // Emptiness and absence are distinct.
         let (empty, absent) = (domain(&[4, 0]), ShapeValue::Presence(false));
         assert!(empty.is_empty() && !empty.is_absent());
         assert!(absent.is_absent() && !absent.is_empty());
     }
 
-    /// A unit that computes nothing: `current = state ?? initial`, with the
-    /// State an Optional Array and the initial value an Array stored as the
-    /// given scalar.
+    /// A selection-only unit for `current = state ?? initial`. State is an
+    /// Optional Array; the fallback is an Array with the specified scalar
+    /// representation.
     fn current(initial: Scalar, selection: impl Fn(KindRef, KindRef) -> Selection) -> Unit {
         let mut tables = Tables::default();
         let (array, array_layout) = tables.reals();
@@ -957,38 +958,38 @@ mod unit {
         let selected = PortRef::Selected(0);
         let mismatch = Some(Defect::KindMismatch(selected));
 
-        // The State when present, the initial value otherwise. Nothing is
-        // computed, so the unit has no stages and no storage of its own.
+        // Select the present State or its fallback without stages or
+        // additional storage.
         let unit = current(Scalar::F64, |array, _| choose(array, 0, Some(1)));
         assert!(unit.check().is_ok());
 
-        // The State as it stands, present or not.
+        // Return the current State, including possible absence.
         let unit = current(Scalar::F64, |_, optional| choose(optional, 0, None));
         assert!(unit.check().is_ok());
 
-        // The two must be kept the same way, so the result has one layout.
+        // Both alternatives must share the result layout.
         let unit = current(Scalar::F32, |array, _| choose(array, 0, Some(1)));
         assert_eq!(unit.check().defect(), mismatch);
 
-        // The first of two must be an Optional: the initial value never is.
+        // The first alternative must be Optional; this fallback is not.
         let unit = current(Scalar::F64, |array, _| choose(array, 1, Some(0)));
         assert_eq!(unit.check().defect(), mismatch);
 
-        // The result is of the fallback's kind, not the Optional's.
+        // The result has the fallback's kind rather than the first input's
+        // Optional kind.
         let unit = current(Scalar::F64, |_, optional| choose(optional, 0, Some(1)));
         assert_eq!(unit.check().defect(), mismatch);
 
-        // A selection must name inputs the unit has.
+        // Selections must reference existing inputs.
         let unit = current(Scalar::F64, |array, _| choose(array, 0, Some(7)));
         assert_eq!(unit.check().defect(), Some(Defect::UnknownInput(selected)));
     }
 
     #[test]
     fn capacity_may_be_the_shape_determined_or_a_bound() {
-        // An Array read from slot 0, whose domain is shape field 0, and a
-        // result in slot 1 whose domain, field 1, a first stage determines
-        // and a second stage uses to fill it. This is the shape of a filter,
-        // which keeps at most as many elements as it reads.
+        // Read an Array from slot 0 with domain field 0. One stage determines
+        // result domain field 1; another fills slot 1 using that domain. This
+        // models a filter whose result is no larger than its input.
         let filter = |capacity: ShapeEntry| {
             let mut tables = Tables::default();
             let (kind, layout) = tables.reals();
@@ -1012,7 +1013,7 @@ mod unit {
                 ..tables.unit()
             }
         };
-        // Storage for exactly the count: providing it consumes the count.
+        // Exact-capacity allocation consumes the computed count.
         let (input, count) = (ShapeRef(0), ShapeRef(1));
         let exact = filter(at(1)).check().unwrap();
         assert_eq!(exact.producer(input), Some(Producer::Input(0)));
@@ -1021,9 +1022,8 @@ mod unit {
         let consumers = [Consumer::Stage(1), stored, Consumer::Result(0)];
         assert_eq!(exact.consumers(count), consumers);
 
-        // Storage for as many as the input holds: providing it consumes
-        // nothing the code computed. The check does not show that the result
-        // fits; that is the code's obligation.
+        // Input-sized allocation requires no computed shape value. The code
+        // must ensure the result fits; validation cannot prove this.
         let bounded = filter(at(0)).check().unwrap();
         assert_eq!(
             bounded.consumers(count),
@@ -1033,8 +1033,8 @@ mod unit {
 
     #[test]
     fn a_frame_lists_regions_then_the_shape_values_used_and_determined() {
-        // A stage that reads slot 3 and writes slot 1, uses a presence and a
-        // rank-2 domain, and determines a length.
+        // The stage reads slot 3, writes slot 1, consumes presence and a
+        // rank-2 domain, and produces a length.
         let fields = [
             ShapeField::Presence,
             ShapeField::Domain { rank: 2 },
