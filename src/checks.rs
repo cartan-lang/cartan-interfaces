@@ -83,6 +83,16 @@ impl Kinds {
                     }
                 }
             }
+            if let Definition::Vector { element, .. } = definition {
+                let field = matches!(
+                    self.definitions[element.0 as usize],
+                    Definition::Real | Definition::Rational | Definition::Complex
+                );
+                if !field {
+                    let names = *element;
+                    return Err(KindDefect::NotAField { at, names });
+                }
+            }
             let malformed = match definition {
                 Definition::Vector { count, .. } => *count == 0,
                 Definition::Sum(variants) => {

@@ -134,9 +134,8 @@ pub struct KindRef(pub u32);
 /// represented here. Two products that differ only in algebra are therefore
 /// treated as one kind, which is wrong.
 ///
-/// Gap: being able to write a fiber here does not make it valid. The
-/// language admits a vector only as a real vector space, and has a distinct
-/// dual that is not named here.
+/// Gap: the dual of a vector space is a distinct fiber and is not named
+/// here.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Definition {
     Bool,
@@ -148,7 +147,9 @@ pub enum Definition {
     Complex,
     /// A color: `r`, `g`, `b` and `a`.
     Color,
-    /// A stated number of components of one fiber, at least one.
+    /// An element of a vector space over a field: a stated number of
+    /// components, at least one, each a `Real`, a `Rational` or a `Complex`.
+    /// An integer vector is not one, since the Ints are not a field.
     Vector {
         element: KindRef,
         count: u32,
@@ -201,6 +202,9 @@ pub enum KindDefect {
     /// A fiber is required and the kind named is not one: the element of an
     /// Array or a Vector, a component of a Product, the payload of a Sum.
     NotAFiber { at: KindRef, names: KindRef },
+    /// The element of a Vector is a fiber that is not a field. A vector space
+    /// is over `Real`, `Rational` or `Complex`.
+    NotAField { at: KindRef, names: KindRef },
     /// A Vector has no components, or a Sum has fewer than two variants or
     /// repeats a variant name.
     Malformed { at: KindRef },

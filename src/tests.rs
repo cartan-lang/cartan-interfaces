@@ -121,6 +121,19 @@ mod kind {
         let twice = vec![variant("Same"), variant("Same")];
         let twice = table(vec![Definition::Real, Definition::Sum(twice)]);
         assert_eq!(twice, Err(KindDefect::Malformed { at }));
+        // A Vector is over a field: Real, Rational or Complex, never Int.
+        let over = |element: Definition| {
+            let vector = Definition::Vector {
+                element: KindRef(0),
+                count: 3,
+            };
+            table(vec![element, vector])
+        };
+        assert_eq!(over(Definition::Rational), Ok(()));
+        assert_eq!(over(Definition::Complex), Ok(()));
+        let names = KindRef(0);
+        let not_a_field = Err(KindDefect::NotAField { at, names });
+        assert_eq!(over(Definition::Int), not_a_field);
         // An Optional never directly holds an Optional.
         let optional = Definition::Optional(KindRef(0));
         let nested = table(vec![
@@ -261,40 +274,37 @@ mod layout {
     #[test]
     fn a_wide_vector_is_laid_out_once_not_once_per_component() {
         let mut kinds = Kinds::default();
-        let real = kinds.define(Definition::Real);
-        let inner = kinds.define(Definition::Vector {
-            element: real,
-            count: 1000,
-        });
-        let outer = kinds.define(Definition::Vector {
-            element: inner,
+        let complex = kinds.define(Definition::Complex);
+        let wide = kinds.define(Definition::Vector {
+            element: complex,
             count: 1000,
         });
         let field = kinds.define(Definition::Array {
-            element: outer,
+            element: wide,
             axes: vec![AxisKind::Closed],
         });
+        assert_eq!(kinds.check(), Ok(()));
 
         let mut layouts = Layouts::default();
         let scalar = layouts.define(Layout::Scalar(Scalar::F32));
-        let row = layouts.define(Layout::Repeat {
+        let pair = layouts.define(Layout::Repeat {
             part: scalar,
-            count: 1000,
+            count: 2,
             plane_step: 0,
             offset_step: 4,
         });
-        let grid = layouts.define(Layout::Repeat {
-            part: row,
+        let row = layouts.define(Layout::Repeat {
+            part: pair,
             count: 1000,
             plane_step: 0,
-            offset_step: 4000,
+            offset_step: 8,
         });
-        let array = layouts.define(Layout::Array(grid));
+        let array = layouts.define(Layout::Array(row));
 
-        // A million scalars in each element, in four definitions.
+        // Two thousand scalars in each element, in four definitions.
         assert_eq!(layouts.definitions.len(), 4);
         let measures = layouts.measure(1).unwrap();
-        assert_eq!(measures.spans[array.0 as usize], [(0, 4_000_000)]);
+        assert_eq!(measures.spans[array.0 as usize], [(0, 8000)]);
         assert!(layouts.fits(array, &kinds, field));
     }
 
