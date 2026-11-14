@@ -30,12 +30,15 @@ standalone clone, the essentials are:
   cannot meet a requirement within it. Take it to the workspace owner with the
   requirement, what the contract cannot express and the smallest change.
 - Own the contracts between Cartan components: plain types and trait
-  signatures, one module per component's side. The only logic is checking that
-  a description is well formed. The crate has no dependencies.
-- Keep the two layers. The runtime-facing modules (`kind`, `layout`,
-  `program`, `unit`, `supply`, `session`) import nothing from the pipeline
-  modules (`syntax`, `graph`, `codegen`, `compile`), which sit behind the
-  default `pipeline` feature.
+  signatures. The only logic is checking that a description is well formed.
+  The crate has no dependencies.
+- Keep the declarations in one file. `src/lib.rs` holds every type and trait
+  with its documentation, in reading order, and no `impl`. Every `impl`,
+  including the checks, goes in `src/checks.rs`, and tests in `src/tests.rs`.
+- Keep the two layers. The runtime-facing sections (kinds, layouts, programs,
+  units, supply, sessions) come first and use nothing from the pipeline
+  sections (syntax, graph, code generation, preparation), whose every item
+  sits behind the default `pipeline` feature.
 - Keep one vocabulary. Make a term a type wherever it can be one, and define
   it once, in that type's documentation. Define a word that cannot be a Rust
   item once, in the documentation of the type it bears on.
