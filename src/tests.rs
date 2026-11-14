@@ -3,37 +3,42 @@
 mod kind {
     use crate::*;
 
-    fn named(members: &[(&str, KindRef)]) -> Vec<(String, KindRef)> {
+    fn named<R: Copy>(members: &[(&str, R)]) -> Vec<(String, R)> {
         members
             .iter()
-            .map(|(name, kind)| (name.to_string(), *kind))
+            .map(|(name, member)| (name.to_string(), *member))
             .collect()
+    }
+
+    /// The kind of a value that is one fiber.
+    fn whole(kinds: &mut Kinds, fiber: Fiber) -> KindRef {
+        let fiber = kinds.fiber(fiber);
+        kinds.define(Kind::Fiber(fiber))
     }
 
     #[test]
     fn nested_structs_with_array_members_state_each_kind_once() {
         let mut kinds = Kinds::default();
-        let real = kinds.define(Definition::Real);
-        let int = kinds.define(Definition::Int);
-        let particle = kinds.define(Definition::Product(named(&[("mass", real), ("id", int)])));
-        let field = kinds.define(Definition::Array {
+        let real = kinds.fiber(Fiber::Real);
+        let int = kinds.fiber(Fiber::Int);
+        let particle = kinds.fiber(Fiber::Product(named(&[("mass", real), ("id", int)])));
+        let field = kinds.define(Kind::Array {
             element: particle,
             axes: vec![AxisKind::Closed],
         });
-        let level = named(&[("cells", field), ("ghosts", field), ("time", real)]);
-        let level = kinds.define(Definition::Struct(level));
-        let mesh = kinds.define(Definition::Struct(named(&[
-            ("coarse", level),
-            ("fine", level),
-        ])));
-        let pair = kinds.define(Definition::Tuple(vec![mesh, mesh]));
+        let time = kinds.define(Kind::Fiber(real));
+        let level = named(&[("cells", field), ("ghosts", field), ("time", time)]);
+        let level = kinds.define(Kind::Struct(level));
+        let mesh = kinds.define(Kind::Struct(named(&[("coarse", level), ("fine", level)])));
+        let pair = kinds.define(Kind::Tuple(vec![mesh, mesh]));
         assert_eq!(kinds.check(), Ok(()));
 
-        // Seven kinds are stated, however deeply they nest.
-        assert_eq!(kinds.definitions.len(), 7);
+        // Three fibers and five kinds are stated, however deeply they nest.
+        assert_eq!((kinds.fibers.len(), kinds.kinds.len()), (3, 5));
         // Stating one again gives the same reference and adds nothing.
-        assert_eq!(kinds.define(Definition::Real), real);
-        assert_eq!(kinds.definitions.len(), 7);
+        assert_eq!(kinds.fiber(Fiber::Real), real);
+        assert_eq!(kinds.define(Kind::Fiber(real)), time);
+        assert_eq!((kinds.fibers.len(), kinds.kinds.len()), (3, 5));
 
         // Each level has two Arrays of two scalars and one Real.
         assert_eq!(
@@ -49,12 +54,12 @@ mod kind {
     fn sharing_keeps_a_doubling_kind_small() {
         // Forty Tuples, each holding the one before it twice.
         let mut kinds = Kinds::default();
-        let mut kind = kinds.define(Definition::Real);
+        let mut kind = whole(&mut kinds, Fiber::Real);
         for _ in 0..40 {
-            kind = kinds.define(Definition::Tuple(vec![kind, kind]));
+            kind = kinds.define(Kind::Tuple(vec![kind, kind]));
         }
         assert_eq!(kinds.check(), Ok(()));
-        assert_eq!(kinds.definitions.len(), 41);
+        assert_eq!(kinds.kinds.len(), 41);
         // A million million scalars, counted without writing any out.
         assert_eq!(kinds.scalar_counts()[kind.0 as usize], Some(1 << 40));
         // Comparing it with a copy in another table visits each pair once.
@@ -64,12 +69,12 @@ mod kind {
     #[test]
     fn the_same_kind_in_two_tables_is_recognized_whatever_its_place() {
         let mut ours = Kinds::default();
-        let real = ours.define(Definition::Real);
-        let ours_state = ours.define(Definition::Optional(real));
+        let real = whole(&mut ours, Fiber::Real);
+        let ours_state = ours.define(Kind::Optional(real));
         let mut theirs = Kinds::default();
-        theirs.define(Definition::Int);
-        let real = theirs.define(Definition::Real);
-        let theirs_state = theirs.define(Definition::Optional(real));
+        whole(&mut theirs, Fiber::Int);
+        let real = whole(&mut theirs, Fiber::Real);
+        let theirs_state = theirs.define(Kind::Optional(real));
         assert_ne!(ours_state, theirs_state);
         assert!(ours.same(ours_state, &theirs, theirs_state));
         assert!(!ours.same(ours_state, &theirs, real));
@@ -77,90 +82,91 @@ mod kind {
 
     #[test]
     fn a_struct_is_not_a_product_and_a_tuple_is_not_a_vector() {
+        // An Array of Structs cannot be written at all: the element of an
+        // Array is a fiber, and a Struct is not one.
         let mut kinds = Kinds::default();
-        let real = kinds.define(Definition::Real);
-        let members = named(&[("x", real), ("y", real)]);
-        let product = kinds.define(Definition::Product(members.clone()));
-        let structure = kinds.define(Definition::Struct(members));
-        let vector = kinds.define(Definition::Vector {
-            element: real,
+        let real = kinds.fiber(Fiber::Real);
+        let member = kinds.define(Kind::Fiber(real));
+        let product = Fiber::Product(named(&[("x", real), ("y", real)]));
+        let product = whole(&mut kinds, product);
+        let structure = kinds.define(Kind::Struct(named(&[("x", member), ("y", member)])));
+        let vector = Fiber::Vector {
+            over: Field::Real,
             count: 2,
-        });
-        let tuple = kinds.define(Definition::Tuple(vec![real, real]));
+        };
+        let vector = whole(&mut kinds, vector);
+        let tuple = kinds.define(Kind::Tuple(vec![member, member]));
         assert_eq!(kinds.check(), Ok(()));
         assert!(!kinds.same(product, &kinds, structure));
         assert!(!kinds.same(vector, &kinds, tuple));
-        // Only the product and the vector may be the element of an Array.
-        assert_eq!(kinds.fibers(), [true, true, false, true, false]);
-        let array = kinds.define(Definition::Array {
-            element: structure,
-            axes: vec![AxisKind::Closed],
-        });
-        let defect = KindDefect::NotAFiber {
-            at: array,
-            names: structure,
-        };
-        assert_eq!(kinds.check(), Err(defect));
     }
 
     #[test]
     fn a_table_is_refused_for_each_broken_rule() {
-        let table = |definitions: Vec<Definition>| Kinds { definitions }.check();
-        let at = KindRef(1);
-        let variant = |name: &str| (name.to_string(), None);
-
-        // A kind may not refer to itself or to a later kind.
-        let itself = table(vec![Definition::Real, Definition::Optional(KindRef(1))]);
-        assert_eq!(itself, Err(KindDefect::NotYetStated { at, names: at }));
-        // A sum needs two variants, with different names.
-        let one = table(vec![
-            Definition::Real,
-            Definition::Sum(vec![variant("Only")]),
-        ]);
-        assert_eq!(one, Err(KindDefect::Malformed { at }));
-        let twice = vec![variant("Same"), variant("Same")];
-        let twice = table(vec![Definition::Real, Definition::Sum(twice)]);
-        assert_eq!(twice, Err(KindDefect::Malformed { at }));
-        // A Vector is over a field: Real, Rational or Complex, never Int.
-        let over = |element: Definition| {
-            let vector = Definition::Vector {
-                element: KindRef(0),
-                count: 3,
-            };
-            table(vec![element, vector])
+        let fibers = |fibers: Vec<Fiber>| {
+            let kinds = Vec::new();
+            Kinds { fibers, kinds }.check()
         };
-        assert_eq!(over(Definition::Rational), Ok(()));
-        assert_eq!(over(Definition::Complex), Ok(()));
-        let names = KindRef(0);
-        let not_a_field = Err(KindDefect::NotAField { at, names });
-        assert_eq!(over(Definition::Int), not_a_field);
+        let kinds = |kinds: Vec<Kind>| {
+            let fibers = vec![Fiber::Real];
+            Kinds { fibers, kinds }.check()
+        };
+        let variant = |name: &str| (name.to_string(), None);
+        let (first, again) = (FiberRef(0), FiberRef(1));
+
+        // A fiber may not refer to itself or to a later fiber.
+        let itself = fibers(vec![Fiber::Product(named(&[("x", first)]))]);
+        let defect = KindDefect::FiberNotYetStated {
+            at: first,
+            names: first,
+        };
+        assert_eq!(itself, Err(defect));
+        // A sum needs two variants, with different names.
+        let malformed = Err(KindDefect::Malformed { at: first });
+        assert_eq!(fibers(vec![Fiber::Sum(vec![variant("Only")])]), malformed);
+        let twice = vec![variant("Same"), variant("Same")];
+        assert_eq!(fibers(vec![Fiber::Sum(twice)]), malformed);
+        // A Vector has at least one component, over any of the fields.
+        let vector = |over, count| fibers(vec![Fiber::Vector { over, count }]);
+        assert_eq!(vector(Field::Rational, 3), Ok(()));
+        assert_eq!(vector(Field::Complex, 3), Ok(()));
+        assert_eq!(vector(Field::Real, 0), malformed);
+        // A fiber is stated once.
+        let defect = KindDefect::FiberStatedTwice { first, again };
+        assert_eq!(fibers(vec![Fiber::Real, Fiber::Real]), Err(defect));
+
+        let (first, again) = (KindRef(0), KindRef(1));
+        let real = Kind::Fiber(FiberRef(0));
+        // A kind names a fiber that is in the table.
+        let names = FiberRef(5);
+        let defect = KindDefect::UnknownFiber { at: first, names };
+        assert_eq!(kinds(vec![Kind::Fiber(names)]), Err(defect));
+        // A kind may not refer to itself or to a later kind.
+        let itself = kinds(vec![real.clone(), Kind::Optional(again)]);
+        let defect = KindDefect::NotYetStated {
+            at: again,
+            names: again,
+        };
+        assert_eq!(itself, Err(defect));
         // An Optional never directly holds an Optional.
-        let optional = Definition::Optional(KindRef(0));
-        let nested = table(vec![
-            Definition::Real,
-            optional.clone(),
-            Definition::Optional(at),
-        ]);
+        let optional = Kind::Optional(first);
+        let nested = kinds(vec![real.clone(), optional, Kind::Optional(again)]);
         assert_eq!(nested, Err(KindDefect::NestedOptional { at: KindRef(2) }));
         // A kind is stated once.
-        let again = table(vec![Definition::Real, Definition::Real]);
-        let first = KindRef(0);
-        assert_eq!(again, Err(KindDefect::StatedTwice { first, again: at }));
+        let defect = KindDefect::StatedTwice { first, again };
+        assert_eq!(kinds(vec![real.clone(), real]), Err(defect));
     }
 
     #[test]
     fn a_fiber_whose_storage_is_not_described_answers_nothing() {
         let mut kinds = Kinds::default();
-        let real = kinds.define(Definition::Real);
-        let at = kinds.define(Definition::Vector {
-            element: real,
+        let at = kinds.fiber(Fiber::Vector {
+            over: Field::Real,
             count: 3,
         });
-        let facing = kinds.define(Definition::SO3);
-        let pose = kinds.define(Definition::Product(named(&[
-            ("at", at),
-            ("facing", facing),
-        ])));
+        let facing = kinds.fiber(Fiber::SO3);
+        let pose = kinds.fiber(Fiber::Product(named(&[("at", at), ("facing", facing)])));
+        let [at, facing, pose] = [at, facing, pose].map(|fiber| kinds.define(Kind::Fiber(fiber)));
         assert_eq!(kinds.check(), Ok(()));
         // The answer carries through anything built from it.
         let counts = kinds.scalar_counts();
@@ -184,11 +190,11 @@ mod layout {
     /// Kinds for an Array of a product holding a Real and an Int.
     fn particles() -> (Kinds, KindRef) {
         let mut kinds = Kinds::default();
-        let real = kinds.define(Definition::Real);
-        let int = kinds.define(Definition::Int);
+        let real = kinds.fiber(Fiber::Real);
+        let int = kinds.fiber(Fiber::Int);
         let members = vec![("mass".to_string(), real), ("id".to_string(), int)];
-        let particle = kinds.define(Definition::Product(members));
-        let field = kinds.define(Definition::Array {
+        let particle = kinds.fiber(Fiber::Product(members));
+        let field = kinds.define(Kind::Array {
             element: particle,
             axes: vec![AxisKind::Closed],
         });
@@ -274,12 +280,11 @@ mod layout {
     #[test]
     fn a_wide_vector_is_laid_out_once_not_once_per_component() {
         let mut kinds = Kinds::default();
-        let complex = kinds.define(Definition::Complex);
-        let wide = kinds.define(Definition::Vector {
-            element: complex,
+        let wide = kinds.fiber(Fiber::Vector {
+            over: Field::Complex,
             count: 1000,
         });
-        let field = kinds.define(Definition::Array {
+        let field = kinds.define(Kind::Array {
             element: wide,
             axes: vec![AxisKind::Closed],
         });
@@ -311,15 +316,16 @@ mod layout {
     #[test]
     fn a_struct_keeps_each_array_member_in_its_own_planes_with_its_own_domain() {
         let (mut kinds, field) = particles();
-        let real = kinds.define(Definition::Real);
+        let real = kinds.fiber(Fiber::Real);
+        let real = kinds.define(Kind::Fiber(real));
         let level = vec![
             ("cells".to_string(), field),
             ("ghosts".to_string(), field),
             ("time".to_string(), real),
         ];
-        let level = kinds.define(Definition::Struct(level));
+        let level = kinds.define(Kind::Struct(level));
         let mesh = vec![("coarse".to_string(), level), ("fine".to_string(), level)];
-        let mesh = kinds.define(Definition::Struct(mesh));
+        let mesh = kinds.define(Kind::Struct(mesh));
 
         let mut layouts = Layouts::default();
         let scalar = layouts.define(Layout::Scalar(Scalar::F64));
@@ -343,13 +349,14 @@ mod layout {
     #[test]
     fn a_sum_is_laid_out_as_a_tag_then_every_payload() {
         let mut kinds = Kinds::default();
-        let real = kinds.define(Definition::Real);
-        let complex = kinds.define(Definition::Complex);
-        let shape = kinds.define(Definition::Sum(vec![
+        let real = kinds.fiber(Fiber::Real);
+        let complex = kinds.fiber(Fiber::Complex);
+        let shape = kinds.fiber(Fiber::Sum(vec![
             ("Point".to_string(), None),
             ("Segment".to_string(), Some(real)),
             ("Phase".to_string(), Some(complex)),
         ]));
+        let shape = kinds.define(Kind::Fiber(shape));
 
         let mut layouts = Layouts::default();
         let tag = layouts.define(Layout::Scalar(Scalar::I32));
@@ -477,9 +484,9 @@ mod unit {
 
     impl Tables {
         /// A rank-1 Array of one scalar fiber, stored as the given scalar.
-        fn array(&mut self, element: Definition, stored: Scalar) -> (KindRef, LayoutRef) {
-            let element = self.kinds.define(element);
-            let kind = self.kinds.define(Definition::Array {
+        fn array(&mut self, element: Fiber, stored: Scalar) -> (KindRef, LayoutRef) {
+            let element = self.kinds.fiber(element);
+            let kind = self.kinds.define(Kind::Array {
                 element,
                 axes: vec![AxisKind::Closed],
             });
@@ -488,7 +495,7 @@ mod unit {
         }
 
         fn reals(&mut self) -> (KindRef, LayoutRef) {
-            self.array(Definition::Real, Scalar::F64)
+            self.array(Fiber::Real, Scalar::F64)
         }
 
         /// A port for the State, as an input or an output.
@@ -582,7 +589,7 @@ mod unit {
             let mut tables = Tables::default();
             let (array, array_layout) = tables.reals();
             let members = vec![("left".to_string(), array), ("right".to_string(), array)];
-            let pair = tables.kinds.define(Definition::Struct(members));
+            let pair = tables.kinds.define(Kind::Struct(members));
             let parts = vec![part(array_layout, 0, 0), part(array_layout, 1, 0)];
             let pair_layout = tables.layouts.define(Layout::Group(parts));
             let input = tables.port(array, array_layout, vec![at(0)], &[0]);
@@ -616,11 +623,11 @@ mod unit {
     /// the given parts in the given storage.
     fn particles(parts: Vec<(Scalar, u32, u32)>, storage: Vec<Storage>) -> Unit {
         let mut tables = Tables::default();
-        let real = tables.kinds.define(Definition::Real);
-        let int = tables.kinds.define(Definition::Int);
+        let real = tables.kinds.fiber(Fiber::Real);
+        let int = tables.kinds.fiber(Fiber::Int);
         let members = vec![("mass".to_string(), real), ("id".to_string(), int)];
-        let particle = tables.kinds.define(Definition::Product(members));
-        let kind = tables.kinds.define(Definition::Array {
+        let particle = tables.kinds.fiber(Fiber::Product(members));
+        let kind = tables.kinds.define(Kind::Array {
             element: particle,
             axes: vec![AxisKind::Closed],
         });
@@ -694,7 +701,7 @@ mod unit {
     fn a_bool_is_stored_as_a_32_bit_integer() {
         let stored = |scalar| {
             let mut tables = Tables::default();
-            let (kind, layout) = tables.array(Definition::Bool, scalar);
+            let (kind, layout) = tables.array(Fiber::Bool, scalar);
             let port = tables.port(kind, layout, vec![cells(4)], &[0]);
             Unit {
                 outputs: vec![port],
@@ -719,9 +726,9 @@ mod unit {
     ) -> Unit {
         let mut tables = Tables::default();
         let (array, array_layout) = tables.reals();
-        let mut kind = tables.kinds.define(Definition::Optional(array));
+        let mut kind = tables.kinds.define(Kind::Optional(array));
         if nest {
-            kind = tables.kinds.define(Definition::Optional(kind));
+            kind = tables.kinds.define(Kind::Optional(kind));
         }
         let layout = tables.layouts.define(Layout::Optional(array_layout));
         let port = tables.port(kind, layout, shape, &[0]);
@@ -750,7 +757,7 @@ mod unit {
 
         // An Optional never directly holds an Optional.
         let unit = optional(true, vec![at(0), at(1)], cells(100), measure_then_fill());
-        let defect = KindDefect::NestedOptional { at: KindRef(3) };
+        let defect = KindDefect::NestedOptional { at: KindRef(2) };
         assert_eq!(unit.check().defect(), Some(Defect::Kind(defect)));
     }
 
@@ -782,7 +789,7 @@ mod unit {
         let mut tables = Tables::default();
         let (array, array_layout) = tables.reals();
         let members = vec![("first".to_string(), array), ("second".to_string(), array)];
-        let kind = tables.kinds.define(Definition::Struct(members));
+        let kind = tables.kinds.define(Kind::Struct(members));
         let parts = vec![
             part(array_layout, 0, 0),
             part(array_layout, second.0, second.1),
@@ -857,7 +864,7 @@ mod unit {
     #[test]
     fn a_fiber_whose_storage_is_not_described_is_refused_as_unsupported() {
         let mut tables = Tables::default();
-        let matrix = Definition::Mat {
+        let matrix = Fiber::Mat {
             rows: 3,
             columns: 3,
         };
@@ -876,9 +883,10 @@ mod unit {
     #[test]
     fn a_deeply_shared_kind_is_checked_without_walking_every_scalar() {
         let mut tables = Tables::default();
-        let mut kind = tables.kinds.define(Definition::Real);
+        let real = tables.kinds.fiber(Fiber::Real);
+        let mut kind = tables.kinds.define(Kind::Fiber(real));
         for _ in 0..40 {
-            kind = tables.kinds.define(Definition::Tuple(vec![kind, kind]));
+            kind = tables.kinds.define(Kind::Tuple(vec![kind, kind]));
         }
         let layout = tables.layouts.define(Layout::Scalar(Scalar::F64));
         let port = tables.port(kind, layout, Vec::new(), &[0]);
@@ -915,9 +923,9 @@ mod unit {
     fn current(initial: Scalar, selection: impl Fn(KindRef, KindRef) -> Selection) -> Unit {
         let mut tables = Tables::default();
         let (array, array_layout) = tables.reals();
-        let optional = tables.kinds.define(Definition::Optional(array));
+        let optional = tables.kinds.define(Kind::Optional(array));
         let optional_layout = tables.layouts.define(Layout::Optional(array_layout));
-        let (_, initial_layout) = tables.array(Definition::Real, initial);
+        let (_, initial_layout) = tables.array(Fiber::Real, initial);
         let present = ShapeEntry::Runtime(ShapeRef(0));
         let state = tables.port(optional, optional_layout, vec![present, at(1)], &[0]);
         let fallback = tables.port(array, initial_layout, vec![at(2)], &[1]);

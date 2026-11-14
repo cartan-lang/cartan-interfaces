@@ -41,10 +41,15 @@
 // A kind is logical. It says `Int`, not how many bits an Int has, and it says
 // nothing about where a value is stored. Those are choices a port states.
 //
-// A kind is stated once. Kinds live in a table, and wherever a kind is used
-// it is referred to by its place in that table. A Struct nested inside
-// another, or a fiber used by many Arrays, appears once however often it is
-// used, and its facts are worked out once.
+// A fiber is plain data of fixed width, and it is the only thing the element
+// of an Array can be. A kind is a fiber or is built from fibers and kinds.
+// The types say which is which, so a mistake such as an Array of Structs
+// cannot be written.
+//
+// A fiber and a kind are each stated once. They live in two tables, and
+// wherever one is used it is referred to by its place in its table. A Struct
+// nested inside another, or a fiber used by many Arrays, appears once however
+// often it is used, and its facts are worked out once.
 //
 // The fibers named here each have one definition. The list is not claimed to
 // be complete. Naming a fiber does not oblige any component to support it.
@@ -59,7 +64,7 @@
 // are kinds of the language that are not written here yet.
 
 /// One scalar of a value, before any choice of width.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Primitive {
     Bool,
     Int,
@@ -108,36 +113,33 @@ pub enum ShapeField {
     Domain { rank: usize },
 }
 
-/// A reference to one kind: its place in a table of kinds.
-///
-/// Within one checked table, two references name the same kind exactly when
-/// they are equal, as far as these contracts represent kinds. It does not yet
-/// represent a product's algebra, so that guarantee does not reach products
-/// that differ only in algebra.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct KindRef(pub u32);
+/// What a vector space is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Field {
+    Real,
+    Rational,
+    Complex,
+}
 
-/// One kind, stated in terms of references to the kinds it is built from.
+/// A reference to one fiber: its place in a table of fibers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FiberRef(pub u32);
+
+/// Plain data of fixed width: what one site of an Array holds. A fiber has
+/// no references and nothing that is only known at run time.
 ///
-/// A fiber is what one site of an Array holds: plain data of fixed width,
-/// with no references and nothing that is only known at run time. The fibers
-/// are the scalars, `Rational`, `Complex`, `Color`, `Vector`, the rotation
-/// groups, `Mat`, `Form`, `Metric`, `Product` and `Sum`. An Array, an
-/// Optional, a Struct and a Tuple are kinds but not fibers.
-///
-/// A Product, a Sum and a Struct are identified by their names, their order
-/// and what each holds; a Tuple by its positions. The name a kind was
-/// declared under is not part of it. A Struct and a Product with the same
-/// names and members are different kinds, and so are a Tuple and a Vector.
+/// A fiber is stated in terms of references to the fibers it is built from.
+/// A Product and a Sum are identified by their names, their order and what
+/// each holds. The name a fiber was declared under is not part of it.
 ///
 /// Gap: a product's declared algebra is also part of its identity and is not
 /// represented here. Two products that differ only in algebra are therefore
-/// treated as one kind, which is wrong.
+/// treated as one fiber, which is wrong.
 ///
 /// Gap: the dual of a vector space is a distinct fiber and is not named
 /// here.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Definition {
+pub enum Fiber {
     Bool,
     Int,
     Real,
@@ -147,11 +149,11 @@ pub enum Definition {
     Complex,
     /// A color: `r`, `g`, `b` and `a`.
     Color,
-    /// An element of a vector space over a field: a stated number of
-    /// components, at least one, each a `Real`, a `Rational` or a `Complex`.
-    /// An integer vector is not one, since the Ints are not a field.
+    /// An element of a vector space over a field, with a stated number of
+    /// components, at least one. An integer vector is not one, since the
+    /// Ints are not a field.
     Vector {
-        element: KindRef,
+        over: Field,
         count: u32,
     },
     /// A rotation of the plane.
@@ -172,16 +174,43 @@ pub enum Definition {
     Metric {
         dimension: u32,
     },
-    /// Named fiber components in order.
-    Product(Vec<(String, KindRef)>),
+    /// Named components in order.
+    Product(Vec<(String, FiberRef)>),
     /// Exactly one of an ordered roster of at least two distinctly named
-    /// variants, each with a fiber payload or none.
-    Sum(Vec<(String, Option<KindRef>)>),
+    /// variants, each with a payload or none.
+    Sum(Vec<(String, Option<FiberRef>)>),
+}
+
+/// A reference to one kind: its place in a table of kinds.
+///
+/// Within one checked table, two references name the same kind exactly when
+/// they are equal, as far as these contracts represent kinds. They do not yet
+/// represent a product's algebra, so that guarantee does not reach products
+/// that differ only in algebra.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct KindRef(pub u32);
+
+/// What a value is, stated in terms of references to the fibers and kinds it
+/// is built from.
+///
+/// A value is a fiber, or it is built from fibers: an Array holds one fiber
+/// at every site, and an Optional, a Struct and a Tuple hold values of any
+/// kind. Only a fiber can be the element of an Array, and that is what the
+/// types here say.
+///
+/// A Struct is identified by its names, their order and what each holds; a
+/// Tuple by its positions. The name a kind was declared under is not part of
+/// it. A Struct and a Product with the same names and members are different,
+/// and so are a Tuple and a Vector.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// A value that is one fiber.
+    Fiber(FiberRef),
     /// One fiber at every site of a domain. The kind states how many axes the
     /// domain has and the form of each. Where each axis starts and how far it
     /// extends is not part of the kind.
     Array {
-        element: KindRef,
+        element: FiberRef,
         axes: Vec<AxisKind>,
     },
     /// A value of the inner kind, or absence. Optional kinds do not nest:
@@ -193,31 +222,34 @@ pub enum Definition {
     Tuple(Vec<KindRef>),
 }
 
-/// Why a table of kinds is not well formed.
+/// Why the tables of fibers and kinds are not well formed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KindDefect {
-    /// A definition refers to a kind that is not stated before it. Kinds are
-    /// built only from earlier kinds, so no kind contains itself.
-    NotYetStated { at: KindRef, names: KindRef },
-    /// A fiber is required and the kind named is not one: the element of an
-    /// Array or a Vector, a component of a Product, the payload of a Sum.
-    NotAFiber { at: KindRef, names: KindRef },
-    /// The element of a Vector is a fiber that is not a field. A vector space
-    /// is over `Real`, `Rational` or `Complex`.
-    NotAField { at: KindRef, names: KindRef },
+    /// A fiber refers to a fiber that is not stated before it. Fibers are
+    /// built only from earlier fibers, so no fiber contains itself.
+    FiberNotYetStated { at: FiberRef, names: FiberRef },
     /// A Vector has no components, or a Sum has fewer than two variants or
     /// repeats a variant name.
-    Malformed { at: KindRef },
+    Malformed { at: FiberRef },
+    /// Two entries state the same fiber. A fiber is stated once.
+    FiberStatedTwice { first: FiberRef, again: FiberRef },
+    /// A kind names a fiber that is not in the table.
+    UnknownFiber { at: KindRef, names: FiberRef },
+    /// A kind refers to a kind that is not stated before it. Kinds are built
+    /// only from earlier kinds, so no kind contains itself.
+    NotYetStated { at: KindRef, names: KindRef },
     /// An Optional directly holds an Optional.
     NestedOptional { at: KindRef },
-    /// Two definitions state the same kind. A kind is stated once.
+    /// Two entries state the same kind. A kind is stated once.
     StatedTwice { first: KindRef, again: KindRef },
 }
 
-/// A table of kinds. Each definition refers only to definitions before it.
+/// The fibers and kinds that descriptions refer to, each stated once. A fiber
+/// refers only to fibers before it, and a kind only to kinds before it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kinds {
-    pub definitions: Vec<Definition>,
+    pub fibers: Vec<Fiber>,
+    pub kinds: Vec<Kind>,
 }
 
 // ===========================================================================

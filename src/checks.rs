@@ -6,96 +6,81 @@ use std::collections::{HashMap, HashSet};
 
 // Kinds: what a value is
 
+impl Field {
+    /// How many scalars one element of the field has.
+    pub fn scalars(self) -> u64 {
+        match self {
+            Field::Real => 1,
+            Field::Rational | Field::Complex => 2,
+        }
+    }
+}
+
 impl Kinds {
+    /// The reference for a fiber, adding it to the table only if it is not
+    /// already there.
+    pub fn fiber(&mut self, fiber: Fiber) -> FiberRef {
+        let found = self.fibers.iter().position(|known| *known == fiber);
+        let place = found.unwrap_or_else(|| {
+            self.fibers.push(fiber);
+            self.fibers.len() - 1
+        });
+        FiberRef(place as u32)
+    }
+
     /// The reference for a kind, adding it to the table only if it is not
     /// already there.
-    pub fn define(&mut self, definition: Definition) -> KindRef {
-        let found = self
-            .definitions
-            .iter()
-            .position(|known| *known == definition);
+    pub fn define(&mut self, kind: Kind) -> KindRef {
+        let found = self.kinds.iter().position(|known| *known == kind);
         let place = found.unwrap_or_else(|| {
-            self.definitions.push(definition);
-            self.definitions.len() - 1
+            self.kinds.push(kind);
+            self.kinds.len() - 1
         });
         KindRef(place as u32)
     }
 
-    pub fn get(&self, kind: KindRef) -> Option<&Definition> {
-        self.definitions.get(kind.0 as usize)
+    pub fn get(&self, kind: KindRef) -> Option<&Kind> {
+        self.kinds.get(kind.0 as usize)
     }
 
-    fn children(definition: &Definition) -> Vec<KindRef> {
-        match definition {
-            Definition::Vector { element, .. } | Definition::Array { element, .. } => {
-                vec![*element]
-            }
-            Definition::Optional(inner) => vec![*inner],
-            Definition::Product(members) | Definition::Struct(members) => {
-                members.iter().map(|(_, kind)| *kind).collect()
-            }
-            Definition::Sum(variants) => variants.iter().filter_map(|(_, kind)| *kind).collect(),
-            Definition::Tuple(positions) => positions.clone(),
+    pub fn get_fiber(&self, fiber: FiberRef) -> Option<&Fiber> {
+        self.fibers.get(fiber.0 as usize)
+    }
+
+    /// The fibers a fiber is built from.
+    fn parts(fiber: &Fiber) -> Vec<FiberRef> {
+        match fiber {
+            Fiber::Product(members) => members.iter().map(|(_, fiber)| *fiber).collect(),
+            Fiber::Sum(variants) => variants.iter().filter_map(|(_, fiber)| *fiber).collect(),
             _ => Vec::new(),
         }
     }
 
-    /// Which kinds are fibers, one answer per definition.
-    pub fn fibers(&self) -> Vec<bool> {
-        let not_fiber = |definition: &Definition| {
-            matches!(
-                definition,
-                Definition::Array { .. }
-                    | Definition::Optional(_)
-                    | Definition::Struct(_)
-                    | Definition::Tuple(_)
-            )
-        };
-        self.definitions
-            .iter()
-            .map(|definition| !not_fiber(definition))
-            .collect()
+    /// The kinds a kind is built from.
+    fn children(kind: &Kind) -> Vec<KindRef> {
+        match kind {
+            Kind::Optional(inner) => vec![*inner],
+            Kind::Struct(members) => members.iter().map(|(_, kind)| *kind).collect(),
+            Kind::Tuple(positions) => positions.clone(),
+            Kind::Fiber(_) | Kind::Array { .. } => Vec::new(),
+        }
     }
 
-    /// Check that the table is well formed. A checked table states each kind
-    /// once, so within it equal references mean the same kind.
+    /// Check that the tables are well formed. Checked tables state each
+    /// fiber and each kind once, so within them equal references mean the
+    /// same thing.
     pub fn check(&self) -> Result<(), KindDefect> {
-        let fibers = self.fibers();
         let mut seen = HashSet::new();
-        for (index, definition) in self.definitions.iter().enumerate() {
-            let at = KindRef(index as u32);
-            for names in Self::children(definition) {
+        for (index, fiber) in self.fibers.iter().enumerate() {
+            let at = FiberRef(index as u32);
+            for names in Self::parts(fiber) {
                 if names.0 as usize >= index {
-                    return Err(KindDefect::NotYetStated { at, names });
+                    return Err(KindDefect::FiberNotYetStated { at, names });
                 }
             }
-            let needs_fibers = matches!(
-                definition,
-                Definition::Vector { .. }
-                    | Definition::Array { .. }
-                    | Definition::Product(_)
-                    | Definition::Sum(_)
-            );
-            if needs_fibers {
-                for names in Self::children(definition) {
-                    if !fibers[names.0 as usize] {
-                        return Err(KindDefect::NotAFiber { at, names });
-                    }
-                }
-            }
-            if let Definition::Vector { element, .. } = definition {
-                let field = matches!(
-                    self.definitions[element.0 as usize],
-                    Definition::Real | Definition::Rational | Definition::Complex
-                );
-                if !field {
-                    let names = *element;
-                    return Err(KindDefect::NotAField { at, names });
-                }
-            }
-            let malformed = match definition {
-                Definition::Vector { count, .. } => *count == 0,
-                Definition::Sum(variants) => {
+            let malformed = match fiber {
+                Fiber::Vector { count, .. } => *count == 0,
+                Fiber::Sum(variants) => {
                     let mut names = HashSet::new();
                     variants.len() < 2 || !variants.iter().all(|(name, _)| names.insert(name))
                 }
@@ -104,16 +89,35 @@ impl Kinds {
             if malformed {
                 return Err(KindDefect::Malformed { at });
             }
-            if let Definition::Optional(inner) = definition {
-                if matches!(self.definitions[inner.0 as usize], Definition::Optional(_)) {
+            if !seen.insert(fiber) {
+                let first = self.fibers.iter().position(|known| known == fiber);
+                return Err(KindDefect::FiberStatedTwice {
+                    first: FiberRef(first.unwrap_or(index) as u32),
+                    again: at,
+                });
+            }
+        }
+        let mut seen = HashSet::new();
+        for (index, kind) in self.kinds.iter().enumerate() {
+            let at = KindRef(index as u32);
+            if let Kind::Fiber(names) | Kind::Array { element: names, .. } = kind {
+                if names.0 as usize >= self.fibers.len() {
+                    let names = *names;
+                    return Err(KindDefect::UnknownFiber { at, names });
+                }
+            }
+            for names in Self::children(kind) {
+                if names.0 as usize >= index {
+                    return Err(KindDefect::NotYetStated { at, names });
+                }
+            }
+            if let Kind::Optional(inner) = kind {
+                if matches!(self.kinds[inner.0 as usize], Kind::Optional(_)) {
                     return Err(KindDefect::NestedOptional { at });
                 }
             }
-            if !seen.insert(definition) {
-                let first = self
-                    .definitions
-                    .iter()
-                    .position(|known| known == definition);
+            if !seen.insert(kind) {
+                let first = self.kinds.iter().position(|known| known == kind);
                 return Err(KindDefect::StatedTwice {
                     first: KindRef(first.unwrap_or(index) as u32),
                     again: at,
@@ -123,44 +127,52 @@ impl Kinds {
         Ok(())
     }
 
-    /// How many scalars one element of each kind has, one answer per
-    /// definition, worked out once for the whole table. The answer is nothing
-    /// if the kind includes a fiber whose storage is not described, or if the
-    /// count does not fit in 64 bits.
-    ///
-    /// The table must be checked first.
+    /// How many scalars each fiber has, one answer per fiber. The answer is
+    /// nothing if the fiber's storage is not described, or if the count does
+    /// not fit in 64 bits.
     ///
     /// Gap: the storage of `SO2`, `SO3`, `Mat`, `Form` and `Metric` is not
-    /// described. A port of such a kind is refused as unsupported.
-    pub fn scalar_counts(&self) -> Vec<Option<u64>> {
-        let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.definitions.len());
-        for definition in &self.definitions {
-            let of = |kind: &KindRef| counts[kind.0 as usize];
-            let sum = |kinds: Vec<KindRef>| {
-                kinds
-                    .iter()
-                    .try_fold(0u64, |sum, kind| sum.checked_add(of(kind)?))
+    /// described. A port of a kind that includes one is refused as
+    /// unsupported.
+    fn fiber_scalars(&self) -> Vec<Option<u64>> {
+        let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.fibers.len());
+        for fiber in &self.fibers {
+            let parts = Self::parts(fiber)
+                .iter()
+                .try_fold(0u64, |sum, part| sum.checked_add(counts[part.0 as usize]?));
+            let count = match fiber {
+                Fiber::Bool | Fiber::Int | Fiber::Real => Some(1),
+                Fiber::Rational | Fiber::Complex => Some(2),
+                Fiber::Color => Some(4),
+                Fiber::Vector { over, count } => over.scalars().checked_mul(u64::from(*count)),
+                Fiber::Sum(_) => parts.and_then(|payloads| payloads.checked_add(1)),
+                Fiber::Product(_) => parts,
+                Fiber::SO2
+                | Fiber::SO3
+                | Fiber::Mat { .. }
+                | Fiber::Form { .. }
+                | Fiber::Metric { .. } => None,
             };
-            let count = match definition {
-                Definition::Bool | Definition::Int | Definition::Real => Some(1),
-                Definition::Rational | Definition::Complex => Some(2),
-                Definition::Color => Some(4),
-                Definition::Vector { element, count } => {
-                    of(element).and_then(|each| each.checked_mul(u64::from(*count)))
-                }
-                Definition::Sum(_) => {
-                    sum(Self::children(definition)).and_then(|payloads| payloads.checked_add(1))
-                }
-                Definition::Product(_)
-                | Definition::Struct(_)
-                | Definition::Tuple(_)
-                | Definition::Array { .. }
-                | Definition::Optional(_) => sum(Self::children(definition)),
-                Definition::SO2
-                | Definition::SO3
-                | Definition::Mat { .. }
-                | Definition::Form { .. }
-                | Definition::Metric { .. } => None,
+            counts.push(count);
+        }
+        counts
+    }
+
+    /// How many scalars one element of each kind has, one answer per kind,
+    /// worked out once for the whole table. The answer is nothing if the
+    /// kind includes a fiber whose storage is not described, or if the count
+    /// does not fit in 64 bits.
+    ///
+    /// The tables must be checked first.
+    pub fn scalar_counts(&self) -> Vec<Option<u64>> {
+        let fibers = self.fiber_scalars();
+        let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.kinds.len());
+        for kind in &self.kinds {
+            let count = match kind {
+                Kind::Fiber(fiber) | Kind::Array { element: fiber, .. } => fibers[fiber.0 as usize],
+                _ => Self::children(kind)
+                    .iter()
+                    .try_fold(0u64, |sum, kind| sum.checked_add(counts[kind.0 as usize]?)),
             };
             counts.push(count);
         }
@@ -168,21 +180,21 @@ impl Kinds {
     }
 
     /// How many run-time facts a value of each kind has, one answer per
-    /// definition, worked out once for the whole table. The answer is nothing
-    /// if the count does not fit in 64 bits.
+    /// kind, worked out once for the whole table. The answer is nothing if
+    /// the count does not fit in 64 bits.
     pub fn shape_field_counts(&self) -> Vec<Option<u64>> {
-        let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.definitions.len());
-        for definition in &self.definitions {
+        let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.kinds.len());
+        for kind in &self.kinds {
             let members = |counts: &Vec<Option<u64>>| {
-                Self::children(definition)
+                Self::children(kind)
                     .iter()
                     .try_fold(0u64, |sum, kind| sum.checked_add(counts[kind.0 as usize]?))
             };
-            let count = match definition {
-                Definition::Array { .. } => Some(1),
-                Definition::Optional(_) => members(&counts).and_then(|inner| inner.checked_add(1)),
-                Definition::Struct(_) | Definition::Tuple(_) => members(&counts),
-                _ => Some(0),
+            let count = match kind {
+                Kind::Fiber(_) => Some(0),
+                Kind::Array { .. } => Some(1),
+                Kind::Optional(_) => members(&counts).and_then(|inner| inner.checked_add(1)),
+                Kind::Struct(_) | Kind::Tuple(_) => members(&counts),
             };
             counts.push(count);
         }
@@ -214,79 +226,112 @@ impl Kinds {
             return;
         }
         match self.get(kind) {
-            Some(Definition::Array { axes, .. }) => {
-                fields.push(ShapeField::Domain { rank: axes.len() })
-            }
-            Some(Definition::Optional(inner)) => {
+            Some(Kind::Array { axes, .. }) => fields.push(ShapeField::Domain { rank: axes.len() }),
+            Some(Kind::Optional(inner)) => {
                 fields.push(ShapeField::Presence);
                 self.push_shape_fields(*inner, counts, fields);
             }
-            Some(definition @ (Definition::Struct(_) | Definition::Tuple(_))) => {
-                for member in Self::children(definition) {
+            Some(kind @ (Kind::Struct(_) | Kind::Tuple(_))) => {
+                for member in Self::children(kind) {
                     self.push_shape_fields(member, counts, fields);
                 }
             }
-            _ => {}
+            Some(Kind::Fiber(_)) | None => {}
         }
     }
 
-    /// Whether a kind in this table and a kind in another table are the same
-    /// kind. Both tables must be checked. Each pair of kinds is compared
-    /// once, however often it is shared.
+    /// Whether a kind in these tables and a kind in other tables are the
+    /// same kind. Both must be checked. Each pair of kinds, and each pair of
+    /// fibers, is compared once, however often it is shared.
     pub fn same(&self, kind: KindRef, other: &Kinds, theirs: KindRef) -> bool {
-        self.same_with(kind, other, theirs, &mut HashMap::new())
+        let mut known = Compared::default();
+        self.same_kind(kind, other, theirs, &mut known)
     }
 
-    fn same_with(
+    fn same_kind(
         &self,
         kind: KindRef,
         other: &Kinds,
         theirs: KindRef,
-        known: &mut HashMap<(KindRef, KindRef), bool>,
+        known: &mut Compared,
     ) -> bool {
-        if let Some(answer) = known.get(&(kind, theirs)) {
+        if let Some(answer) = known.kinds.get(&(kind, theirs)) {
             return *answer;
         }
         let (Some(mine), Some(yours)) = (self.get(kind), other.get(theirs)) else {
             return false;
         };
-        let (a, b) = (Self::children(mine), Self::children(yours));
-        let head = |definition: &Definition| match definition {
-            Definition::Vector { count, .. } => Definition::Vector {
-                element: KindRef(0),
-                count: *count,
-            },
-            Definition::Array { axes, .. } => Definition::Array {
-                element: KindRef(0),
-                axes: axes.clone(),
-            },
-            Definition::Optional(_) => Definition::Optional(KindRef(0)),
-            Definition::Product(members) => Definition::Product(blank(members)),
-            Definition::Struct(members) => Definition::Struct(blank(members)),
-            Definition::Sum(variants) => Definition::Sum(
-                variants
-                    .iter()
-                    .map(|(name, payload)| (name.clone(), payload.map(|_| KindRef(0))))
-                    .collect(),
-            ),
-            Definition::Tuple(positions) => Definition::Tuple(vec![KindRef(0); positions.len()]),
-            plain => plain.clone(),
+        let names = |members: &[(String, KindRef)]| -> Vec<String> {
+            members.iter().map(|(name, _)| name.clone()).collect()
         };
-        let answer = head(mine) == head(yours)
+        let alike = match (mine, yours) {
+            (Kind::Fiber(a), Kind::Fiber(b)) => self.same_fiber(*a, other, *b, known),
+            (
+                Kind::Array { element: a, axes },
+                Kind::Array {
+                    element: b,
+                    axes: theirs,
+                },
+            ) => axes == theirs && self.same_fiber(*a, other, *b, known),
+            (Kind::Optional(_), Kind::Optional(_)) | (Kind::Tuple(_), Kind::Tuple(_)) => true,
+            (Kind::Struct(a), Kind::Struct(b)) => names(a) == names(b),
+            _ => false,
+        };
+        let (a, b) = (Self::children(mine), Self::children(yours));
+        let answer = alike
             && a.len() == b.len()
             && a.iter()
                 .zip(&b)
-                .all(|(a, b)| self.same_with(*a, other, *b, known));
-        known.insert((kind, theirs), answer);
+                .all(|(a, b)| self.same_kind(*a, other, *b, known));
+        known.kinds.insert((kind, theirs), answer);
+        answer
+    }
+
+    fn same_fiber(
+        &self,
+        fiber: FiberRef,
+        other: &Kinds,
+        theirs: FiberRef,
+        known: &mut Compared,
+    ) -> bool {
+        if let Some(answer) = known.fibers.get(&(fiber, theirs)) {
+            return *answer;
+        }
+        let (Some(mine), Some(yours)) = (self.get_fiber(fiber), other.get_fiber(theirs)) else {
+            return false;
+        };
+        let alike = match (mine, yours) {
+            (Fiber::Product(a), Fiber::Product(b)) => a
+                .iter()
+                .map(|(name, _)| name)
+                .eq(b.iter().map(|(name, _)| name)),
+            (Fiber::Sum(a), Fiber::Sum(b)) => {
+                let head = |variants: &[(String, Option<FiberRef>)]| -> Vec<(String, bool)> {
+                    let entry = |(name, payload): &(String, Option<FiberRef>)| {
+                        (name.clone(), payload.is_some())
+                    };
+                    variants.iter().map(entry).collect()
+                };
+                head(a) == head(b)
+            }
+            (plain, theirs) => plain == theirs,
+        };
+        let (a, b) = (Self::parts(mine), Self::parts(yours));
+        let answer = alike
+            && a.len() == b.len()
+            && a.iter()
+                .zip(&b)
+                .all(|(a, b)| self.same_fiber(*a, other, *b, known));
+        known.fibers.insert((fiber, theirs), answer);
         answer
     }
 }
 
-fn blank(members: &[(String, KindRef)]) -> Vec<(String, KindRef)> {
-    members
-        .iter()
-        .map(|(name, _)| (name.clone(), KindRef(0)))
-        .collect()
+/// The pairs already compared by `Kinds::same`.
+#[derive(Default)]
+struct Compared {
+    kinds: HashMap<(KindRef, KindRef), bool>,
+    fibers: HashMap<(FiberRef, FiberRef), bool>,
 }
 
 // Layouts: how a value sits in storage
@@ -457,102 +502,125 @@ impl Layouts {
 
     /// Whether a layout lays out a kind: the same structure, part for part,
     /// with every scalar stored in a way that can hold it. Both tables must
-    /// be checked. Each pairing of a kind with a layout is examined once,
-    /// however often it is shared.
+    /// be checked. Each pairing of a layout with a kind or a fiber is
+    /// examined once, however often it is shared.
     ///
     /// A kind whose storage is not described fits no layout.
     pub fn fits(&self, layout: LayoutRef, kinds: &Kinds, kind: KindRef) -> bool {
-        self.fits_with(layout, kinds, kind, &mut HashMap::new())
+        self.holds(layout, kinds, Held::Kind(kind), &mut HashMap::new())
     }
 
-    fn fits_with(
+    fn holds(
         &self,
         layout: LayoutRef,
         kinds: &Kinds,
-        kind: KindRef,
-        known: &mut HashMap<(LayoutRef, KindRef), bool>,
+        held: Held,
+        known: &mut HashMap<(LayoutRef, Held), bool>,
     ) -> bool {
-        if let Some(answer) = known.get(&(layout, kind)) {
+        if let Some(answer) = known.get(&(layout, held)) {
             return *answer;
         }
-        let (Some(how), Some(what)) = (self.get(layout), kinds.get(kind)) else {
+        let Some(how) = self.get(layout) else {
             return false;
         };
-        let scalar = |layout: LayoutRef, primitive: Primitive| matches!(self.get(layout), Some(Layout::Scalar(scalar)) if scalar.stores(primitive));
-        // What a group or a repeat must hold, one entry for each part.
-        enum Holds {
-            Kind(KindRef),
-            Scalar(Primitive),
-        }
-        let members: Option<Vec<Holds>> = match what {
-            Definition::Rational => Some(vec![
-                Holds::Scalar(Primitive::Int),
-                Holds::Scalar(Primitive::Int),
-            ]),
-            Definition::Complex => Some((0..2).map(|_| Holds::Scalar(Primitive::Real)).collect()),
-            Definition::Color => Some((0..4).map(|_| Holds::Scalar(Primitive::Real)).collect()),
-            Definition::Product(members) | Definition::Struct(members) => {
-                Some(members.iter().map(|(_, kind)| Holds::Kind(*kind)).collect())
+        let answer = match (how, held.form(kinds)) {
+            (Layout::Scalar(scalar), Form::Scalar(primitive)) => scalar.stores(primitive),
+            (Layout::Array(element), Form::Array(fiber)) => {
+                self.holds(*element, kinds, Held::Fiber(fiber), known)
             }
-            Definition::Tuple(positions) => {
-                Some(positions.iter().map(|kind| Holds::Kind(*kind)).collect())
+            (Layout::Optional(inner), Form::Optional(kind)) => {
+                self.holds(*inner, kinds, Held::Kind(kind), known)
             }
-            Definition::Sum(variants) => {
-                let payloads = variants.iter().filter_map(|(_, payload)| *payload);
-                let tag = std::iter::once(Holds::Scalar(Primitive::Int));
-                Some(tag.chain(payloads.map(Holds::Kind)).collect())
+            (Layout::Group(parts), Form::Each(members)) => {
+                let mut pairs = parts.iter().zip(&members);
+                parts.len() == members.len()
+                    && pairs.all(|(part, held)| self.holds(part.layout, kinds, *held, known))
             }
-            _ => None,
-        };
-        let mut holds = |this: &Self, layout: LayoutRef, held: &Holds| match held {
-            Holds::Scalar(primitive) => scalar(layout, *primitive),
-            Holds::Kind(kind) => this.fits_with(layout, kinds, *kind, known),
-        };
-        let answer = match (how, what) {
-            (Layout::Scalar(scalar), Definition::Bool) => scalar.stores(Primitive::Bool),
-            (Layout::Scalar(scalar), Definition::Int) => scalar.stores(Primitive::Int),
-            (Layout::Scalar(scalar), Definition::Real) => scalar.stores(Primitive::Real),
-            (Layout::Array(element), Definition::Array { element: kind, .. }) => {
-                self.fits_with(*element, kinds, *kind, known)
-            }
-            (Layout::Optional(inner), Definition::Optional(kind)) => {
-                self.fits_with(*inner, kinds, *kind, known)
-            }
-            (
-                Layout::Repeat { part, count, .. },
-                Definition::Vector {
-                    element,
-                    count: width,
-                },
-            ) => count == width && self.fits_with(*part, kinds, *element, known),
-            (Layout::Group(parts), Definition::Vector { element, count }) => {
-                parts.len() as u64 == u64::from(*count)
+            (Layout::Group(parts), Form::Alike(member, count)) => {
+                parts.len() as u64 == u64::from(count)
                     && parts
                         .iter()
-                        .all(|part| holds(self, part.layout, &Holds::Kind(*element)))
+                        .all(|part| self.holds(part.layout, kinds, member, known))
             }
-            (Layout::Group(parts), _) => match &members {
-                Some(members) => {
-                    parts.len() == members.len()
-                        && parts
-                            .iter()
-                            .zip(members)
-                            .all(|(part, held)| holds(self, part.layout, held))
-                }
-                None => false,
-            },
-            (Layout::Repeat { part, count, .. }, _) => match &members {
-                // A repeat stands for a group whose parts are all alike.
-                Some(members) => {
-                    *count as usize == members.len()
-                        && members.iter().all(|held| holds(self, *part, held))
-                }
-                None => false,
-            },
+            // A repeat stands for a group whose parts are all alike.
+            (Layout::Repeat { part, count, .. }, Form::Each(members)) => {
+                *count as usize == members.len()
+                    && members
+                        .iter()
+                        .all(|held| self.holds(*part, kinds, *held, known))
+            }
+            (Layout::Repeat { part, count, .. }, Form::Alike(member, width)) => {
+                *count == width && self.holds(*part, kinds, member, known)
+            }
             _ => false,
         };
-        known.insert((layout, kind), answer);
+        known.insert((layout, held), answer);
         answer
+    }
+}
+
+/// Something a layout may be asked to lay out.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Held {
+    Kind(KindRef),
+    Fiber(FiberRef),
+    Field(Field),
+    Scalar(Primitive),
+}
+
+/// The structure of something to be laid out, one level deep.
+enum Form {
+    Scalar(Primitive),
+    /// Parts in order.
+    Each(Vec<Held>),
+    /// A stated number of parts, all alike.
+    Alike(Held, u32),
+    Array(FiberRef),
+    Optional(KindRef),
+    /// Storage that is not described.
+    Unknown,
+}
+
+impl Held {
+    fn form(self, kinds: &Kinds) -> Form {
+        let alike = |primitive, count| Form::Alike(Held::Scalar(primitive), count);
+        let fibers = |fibers: Vec<FiberRef>| fibers.into_iter().map(Held::Fiber);
+        match self {
+            Held::Scalar(primitive) => Form::Scalar(primitive),
+            Held::Field(Field::Real) => Form::Scalar(Primitive::Real),
+            Held::Field(Field::Rational) => alike(Primitive::Int, 2),
+            Held::Field(Field::Complex) => alike(Primitive::Real, 2),
+            Held::Fiber(fiber) => match kinds.get_fiber(fiber) {
+                Some(Fiber::Bool) => Form::Scalar(Primitive::Bool),
+                Some(Fiber::Int) => Form::Scalar(Primitive::Int),
+                Some(Fiber::Real) => Form::Scalar(Primitive::Real),
+                Some(Fiber::Rational) => alike(Primitive::Int, 2),
+                Some(Fiber::Complex) => alike(Primitive::Real, 2),
+                Some(Fiber::Color) => alike(Primitive::Real, 4),
+                Some(Fiber::Vector { over, count }) => Form::Alike(Held::Field(*over), *count),
+                Some(product @ Fiber::Product(_)) => {
+                    Form::Each(fibers(Kinds::parts(product)).collect())
+                }
+                // An Int tag, then every variant's payload in declared order.
+                Some(sum @ Fiber::Sum(_)) => {
+                    let tag = std::iter::once(Held::Scalar(Primitive::Int));
+                    Form::Each(tag.chain(fibers(Kinds::parts(sum))).collect())
+                }
+                _ => Form::Unknown,
+            },
+            Held::Kind(kind) => match kinds.get(kind) {
+                Some(Kind::Fiber(fiber)) => Held::Fiber(*fiber).form(kinds),
+                Some(Kind::Array { element, .. }) => Form::Array(*element),
+                Some(Kind::Optional(inner)) => Form::Optional(*inner),
+                Some(members @ (Kind::Struct(_) | Kind::Tuple(_))) => Form::Each(
+                    Kinds::children(members)
+                        .into_iter()
+                        .map(Held::Kind)
+                        .collect(),
+                ),
+                None => Form::Unknown,
+            },
+        }
     }
 }
 
@@ -1002,7 +1070,7 @@ impl Unit {
                 Some(otherwise) => {
                     let otherwise = input(otherwise)?;
                     let holds = match self.kinds.get(first.kind) {
-                        Some(Definition::Optional(holds)) => Some(*holds),
+                        Some(Kind::Optional(holds)) => Some(*holds),
                         _ => None,
                     };
                     let kept = match self.layouts.get(first.layout) {

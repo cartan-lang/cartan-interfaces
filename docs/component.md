@@ -30,10 +30,13 @@ Every `impl`, including the checks that a description is well formed, is in
 The runtime-facing sections come first. They are everything a runtime needs from
 a compiler and everything an application needs from a runtime:
 
-- Kinds say what a value is: fibers, Arrays with the form of each axis,
-  Optional values, Structs and Tuples. They are the language's kinds, not the
-  rules that assign them. Kinds live in a table and are referred to by their
-  place in it, so a kind used in many places is stated once. Naming a fiber
+- Kinds say what a value is. A fiber is plain data of fixed width, the only
+  thing an Array's element can be, and a Vector is over a field. A kind is a
+  fiber, an Array with the form of each axis, an Optional, a Struct or a
+  Tuple. The types state these rules, so an Array of Structs cannot be
+  written. They are the language's kinds, not the rules that assign them.
+  Fibers and kinds live in tables and are referred to by their place, so one
+  used in many places is stated once. Naming a fiber
   obliges no component to support it; where the storage of a fiber is not
   described, a unit carrying it is refused as unsupported.
 - Layouts say how a value is kept in storage: which planes it uses and where
