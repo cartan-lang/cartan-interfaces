@@ -36,10 +36,9 @@ standalone clone, the essentials are:
   `program`, `unit`, `supply`, `session`) import nothing from the pipeline
   modules (`syntax`, `graph`, `codegen`, `compile`), which sit behind the
   default `pipeline` feature.
-- Keep one vocabulary. `glossary` lists every official term. Make a term a
-  type wherever it can be one, and define it once, in that type's
-  documentation. A term that cannot be a Rust item is defined in `glossary`
-  and nowhere else. Add a word there before using it in a contract.
+- Keep one vocabulary. Make a term a type wherever it can be one, and define
+  it once, in that type's documentation. Define a word that cannot be a Rust
+  item once, in the documentation of the type it bears on.
 - A change here is an agreement between the components on both sides of a
   boundary. Agree it with their owners before committing, and with the
   workspace owner for the runtime-facing layer.

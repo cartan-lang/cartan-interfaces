@@ -43,10 +43,8 @@ everything an application needs from a runtime:
   made of it.
 - `session` is what an application asks of a runtime and what a runtime reports.
 
-`glossary` lists every official term of both layers. A term that is a type is
-defined in that type's documentation and listed there by re-export. A term that
-cannot be a Rust item is defined there and nowhere else. The generated
-documentation of that module is the glossary.
+Each term the contracts use is a type wherever it can be one, and is defined
+once, in that type's documentation.
 
 The runtime-facing modules import nothing from the pipeline modules. A compiler
 built from other components implements `Supplier` and is run by the same

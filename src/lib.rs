@@ -19,8 +19,8 @@
 //! storage, runs the stages and publishes results. Compiled code never
 //! allocates memory and never publishes.
 //!
-//! Every official term is listed in [`glossary`]. A term that is a type is
-//! defined in that type's documentation; the rest are defined there.
+//! Each term the contracts use is a type wherever it can be one, and is
+//! defined once, in that type's documentation.
 //!
 //! Everything here is a draft. Doc paragraphs starting `Gap:` name parts of a
 //! contract that are not written yet; paragraphs starting `Decide:` name open
@@ -38,9 +38,6 @@ pub mod unit;
 pub mod supply;
 
 pub mod session;
-
-// Every official term, in one place.
-pub mod glossary;
 
 // The official compiler's pipeline, in order.
 #[cfg(feature = "pipeline")]
