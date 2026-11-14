@@ -11,18 +11,24 @@ pub struct Axis {
     pub extent: u64,
 }
 
-/// The value of a shape field: a size, or presence.
+/// One fact about a value that is only known at run time: the length of a
+/// List, the domain of an Array, or whether an Optional is present.
+///
+/// A shape value is logical. It says how many elements a value has and where,
+/// or whether the value is there at all. It is not a number of bytes. The
+/// bytes of one element are fixed at compile time, and the bytes of an
+/// allocation are never stated in a unit: the runtime works them out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeValue {
-    /// Whether an Optional value is present. Not a size; it counts nothing.
+    /// Whether an Optional value is present. It counts nothing.
     Presence(bool),
     Length(u64),
     Domain(Vec<Axis>),
 }
 
 impl ShapeValue {
-    /// How many elements this size describes, or nothing if it is presence
-    /// or the count does not fit in 64 bits.
+    /// How many elements a length or a domain counts, or nothing if this is
+    /// presence or the count does not fit in 64 bits.
     pub fn count(&self) -> Option<u64> {
         match self {
             ShapeValue::Presence(_) => None,
@@ -44,49 +50,49 @@ impl ShapeValue {
     }
 }
 
-/// One size or presence in a unit's table of them.
+/// One shape value in a unit's table of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShapeRef(pub u32);
 
-/// A size or presence that is either fixed in the code or named in the
-/// unit's table.
+/// A shape value that is either fixed in the code or named in the unit's
+/// table.
 ///
-/// A size or presence belongs to the value it describes and is kept apart
-/// from the value's planes. An absent value has a presence and no storage,
-/// and a value that is kept keeps its sizes and presence with it.
+/// A shape value belongs to the value it describes and is kept apart from
+/// that value's planes. An absent value has a presence and no storage, and a
+/// value that is kept keeps its shape values with it.
 ///
-/// Sizes and presence are consumed the way storage is: only after they are
+/// Shape values are consumed the way storage is: only after they are
 /// produced. Unlike storage, which several stages may write in list order, a
-/// size or presence is fixed once produced, so each named one has one
-/// producer and any number of consumers. The sizes of an input come with the
+/// shape value is fixed once produced, so each named one has one producer
+/// and any number of consumers. The shape values of an input come with the
 /// value bound to it. Any other is determined by one stage. A stage that
 /// uses it, storage whose capacity names it and a result that has it are its
-/// consumers. Several ports may refer to one size. That states once that the
-/// values have the same size.
+/// consumers. Several ports may refer to one shape value. That states once
+/// that the values have the same shape.
 ///
 /// The runtime is a consumer too, but only where something it does needs the
-/// value: providing storage whose capacity names the size, verifying a
-/// specialization, making a selection, or answering an observation. A size
-/// that only compiled code consumes need not be read by the runtime.
+/// value: providing storage whose capacity names it, verifying a
+/// specialization, making a selection, or answering an observation. A shape
+/// value that only compiled code consumes need not be read by the runtime.
 ///
-/// A size that was never produced is different from a presence that says a
-/// value is absent. Producing and consuming apply only where a size applies.
-/// The sizes within an Optional that turns out absent are not produced, and
-/// a stage that uses them consumes nothing then: a stage that works out a
-/// length when present, and zero otherwise, uses the presence and, only when
-/// present, the length. Storage provided for a result that turns out absent
-/// goes unused. The check works from what the description declares, not from
-/// which sizes apply on a given run.
+/// A shape value that was never produced is different from a presence that
+/// says a value is absent. Producing and consuming apply only where a shape
+/// value applies. Those within an Optional that turns out absent are not
+/// produced, and a stage that uses them consumes nothing then: a stage that
+/// works out a length when present, and zero otherwise, uses the presence
+/// and, only when present, the length. Storage provided for a result that
+/// turns out absent goes unused. The check works from what the description
+/// declares, not from which shape values apply on a given run.
 ///
 /// In an input port, `Fixed` is a specialization: the value bound must have
-/// that size, and the runtime verifies it before any stage runs. A change of
-/// extent needs no recompilation unless the code chose to specialize on it.
-/// Two inputs that refer to one size must agree in the same way. The runtime
-/// never treats two different sizes as one.
+/// that shape, and the runtime verifies it before any stage runs. A change
+/// of extent needs no recompilation unless the code chose to specialize on
+/// it. Two inputs that refer to one shape value must agree in the same way.
+/// The runtime never treats two different shapes as one.
 ///
-/// Gap: how a size or presence is physically kept, in which memory, how it
-/// reaches a stage or a later consumer, and how a stage is told that a size
-/// does not apply, is not written.
+/// Gap: how a shape value is physically kept, in which memory, how it reaches
+/// a stage or a later consumer, and how a stage is told that one does not
+/// apply, is not written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeEntry {
     Fixed(ShapeValue),
@@ -115,17 +121,18 @@ pub enum Memory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot(pub u32);
 
-/// What storage a slot needs: which memory, and how much of it as a
-/// compile-time element size times a run-time capacity.
+/// What storage a slot needs: which memory, the bytes of one element, which
+/// are fixed at compile time, and how many elements, which is a count given
+/// by shape values.
 ///
-/// A unit never asks for a number of bytes, and it never asks at all: this
-/// description is the request. The runtime provides the storage before the
-/// stage that first writes it. That makes the runtime a consumer of every
-/// size the capacity names, and of no others.
+/// A unit never states the bytes of an allocation, and it never asks for
+/// storage at all: this description is the request. The runtime provides the
+/// storage before the stage that first writes it. That makes the runtime a
+/// consumer of every shape value the capacity names, and of no others.
 ///
 /// What the code writes must fit the stated capacity. That is an obligation
 /// on the code. The check cannot establish it, and the runtime is not
-/// required to read a size in order to verify it.
+/// required to read a shape value in order to verify it.
 ///
 /// The storage a slot is given may be a region of a larger allocation. The
 /// runtime passes it as a base and an offset from that base, and a whole
@@ -140,16 +147,16 @@ pub struct Need {
     pub element_bytes: u32,
     pub align: u32,
     /// How many elements the slot must be able to hold: the product of these.
-    /// Empty means one element. Every size here is produced before the stage
-    /// that first writes the slot.
+    /// Empty means one element. Each is a length or a domain, and each is
+    /// produced before the stage that first writes the slot.
     pub capacity: Vec<ShapeEntry>,
 }
 
 /// What each slot is for. This decides who may write it.
 #[derive(Clone, Debug)]
 pub enum Storage {
-    /// A plane of an input value: the memory, element size and number of
-    /// elements the unit expects to find. Never written.
+    /// A plane of an input value: the memory, the bytes of one element and
+    /// the number of elements the unit expects to find. Never written.
     Input(Need),
     /// A plane of a result. Written by this unit, then handed to the runtime.
     Output(Need),
@@ -160,11 +167,11 @@ pub enum Storage {
     Scratch(Need),
 }
 
-/// One value entering or leaving a unit: its kind, its layout, its sizes and
+/// One value entering or leaving a unit: its kind, its layout, its shape and
 /// the storage that holds it. The kind says what the value is and the layout
 /// says how it is kept. The layout must lay out that kind, and the port gives
-/// one size or presence for each run-time fact of the kind and one slot for
-/// each plane of the layout.
+/// one shape value for each run-time fact of the kind and one slot for each
+/// plane of the layout.
 ///
 /// Decide: a value is bound to a port only if their layouts are identical.
 /// Converting between layouts would be an explicit computation, never
@@ -187,7 +194,7 @@ pub struct Port {
 
 /// A result that is one of the unit's inputs, unchanged.
 ///
-/// The result is the value itself: its sizes, its layout and its storage.
+/// The result is the value itself: its shape, its layout and its storage.
 /// Nothing is computed and nothing is copied.
 ///
 /// With no `otherwise`, the result is the input `first`. This is how a unit
@@ -197,8 +204,8 @@ pub struct Port {
 /// result is what it holds, and when it is absent the result is the input
 /// `otherwise`. The runtime makes the choice, which makes it a consumer of
 /// the presence of `first`. The two must be kept the same way, so the result
-/// has one layout whichever is chosen. They need not have the same sizes:
-/// the result has the sizes of the one chosen.
+/// has one layout whichever is chosen. They need not have the same shape:
+/// the result has the shape of the one chosen.
 ///
 /// An input that the unit uses only as the `otherwise` of selections is
 /// needed only when one of them would choose it. While the Optional input is
@@ -218,30 +225,37 @@ pub struct Selection {
     pub otherwise: Option<u32>,
 }
 
-/// One compiled computation: an entry point in the code. A stage is the only
-/// execution boundary in this contract.
+/// One compiled computation: an entry point in the code. A stage is one
+/// launch. The runtime starts it, and it runs to completion without the
+/// runtime. A stage is the only execution boundary in this contract.
 ///
 /// A stage is given what it consumes and the storage it writes. It computes
-/// and produces results: what it writes, and the sizes and presence it
-/// determines. Compiled code never calls the runtime. Everything a stage
-/// needs is provided before it runs, and whenever the runtime must act, it
-/// acts between stages. All providing of storage, and any waiting for it, is
-/// the runtime's.
+/// and produces results: what it writes, and the shape values it determines.
+/// Compiled code never calls the runtime. Everything a stage needs is
+/// provided before it runs, and whenever the runtime must act, it acts
+/// between stages. All providing of storage, and any waiting for it, is the
+/// runtime's.
+///
+/// The runtime starts every stage, and between two stages it need do nothing
+/// more. It provides storage first only if the next stage writes storage not
+/// yet provided, and it waits for an earlier stage only if it must itself
+/// read something that stage produced. Computations that can run as one
+/// launch may be one stage; nothing requires it.
 ///
 /// A stage consumes only what was produced before it, by the values bound to
-/// inputs or by earlier stages. That holds for sizes and presence exactly as
-/// it holds for storage.
+/// inputs or by earlier stages. That holds for shape values exactly as it
+/// holds for storage.
 ///
-/// No value is sized from its own contents. The size of a result may depend
-/// on data, but only on data computed before the result is filled. A stage
-/// that writes part of a result uses the sizes and presence that govern that
+/// No value takes its shape from its own contents. The shape of a result may
+/// depend on data, but only on data computed before the result is filled. A
+/// stage that writes part of a result uses the shape values that govern that
 /// part, so it cannot be the stage that determines them. One stage
 /// determines, and a later stage fills.
 ///
 /// Stages are listed in an order in which they can run. The runtime owns the
 /// order of execution. It may run stages in another order, or overlapped,
-/// only where each still finds in storage, and in the sizes it uses, what
-/// list order would have given it.
+/// only where each still finds in storage, and in the shape values it uses,
+/// what list order would have given it.
 ///
 /// A stage has no failure to report. Cartan is total, so compiled code always
 /// runs to completion and every outcome it computes is an ordinary value. A
@@ -259,33 +273,33 @@ pub struct Selection {
 /// so a stage whose inputs are all available on the host cannot be placed
 /// there.
 ///
-/// Gap: which of the sizes a stage uses set the extent it is dispatched over
-/// is not stated.
+/// Gap: which of the shape values a stage uses set the extent it is
+/// dispatched over is not stated.
 ///
 /// Gap: the rest of the calling convention of a stage on each target is not
-/// written yet: what a base is, how the entry is named, and how sizes and
-/// presence are passed.
+/// written yet: what a base is, how the entry is named, and how shape values
+/// are passed.
 #[derive(Clone, Debug, Default)]
 pub struct Stage {
     /// Storage this stage reads.
     pub reads: Vec<Slot>,
     /// Storage this stage writes.
     pub writes: Vec<Slot>,
-    /// Sizes and presence this stage consumes. This declares a dependency.
-    /// It does not require the code to load the value, and it does not by
-    /// itself require the runtime to read it.
+    /// Shape values this stage consumes. This declares a dependency. It does
+    /// not require the code to load the value, and it does not by itself
+    /// require the runtime to read it.
     pub uses: Vec<ShapeRef>,
-    /// Sizes and presence this stage produces.
+    /// Shape values this stage produces.
     pub determines: Vec<ShapeRef>,
 }
 
 /// Everything the runtime needs to know to run a piece of compiled code.
 ///
 /// A unit is a description, not an execution boundary. It is the scope in
-/// which storage, sizes, kinds and layouts are stated once, and it says which
-/// results answer which roots. Its stages are what runs. One rule holds
-/// inside a unit and between units: whatever is consumed was produced first,
-/// by a stage or by whatever produced the value bound to an input.
+/// which storage, shape values, kinds and layouts are stated once, and it
+/// says which results answer which roots. Its stages are what runs. One rule
+/// holds inside a unit and between units: whatever is consumed was produced
+/// first, by a stage or by whatever produced the value bound to an input.
 ///
 /// A unit's results are a function of its inputs and of nothing else.
 ///
@@ -295,7 +309,7 @@ pub struct Stage {
 ///
 /// A value's domain is where it has values at all. It is distinct from the
 /// sites a unit is asked to fill on one run, and from the sites that storage
-/// currently covers. A size in a port is the value's domain.
+/// currently covers. A domain in a port is the value's domain.
 ///
 /// Gap: how the sites asked for and the sites storage covers are stated,
 /// when they are not the whole domain, is not written yet.
@@ -319,7 +333,7 @@ pub struct Unit {
     /// Results that are inputs, unchanged.
     pub selected: Vec<Selection>,
     pub storage: Vec<Storage>,
-    /// Every size and presence not fixed at compile time, each stated once.
+    /// Every shape value not fixed at compile time, each stated once.
     pub shape_fields: Vec<ShapeField>,
     pub stages: Vec<Stage>,
 }
@@ -356,23 +370,23 @@ pub enum PortRef {
 pub enum Defect {
     UnknownSlot(Slot),
     UnknownShapeField(ShapeRef),
-    /// A stage uses a size or presence, or writes storage whose capacity names
+    /// A stage uses a shape value, or writes storage whose capacity names
     /// one, that nothing before it produces. A stage cannot produce what it
-    /// consumes, so it cannot size a result it is filling.
+    /// consumes, so it cannot give a result it is filling its shape.
     ShapeNotYetKnown {
         stage: u32,
         field: ShapeRef,
     },
-    /// A size or presence has more than one producer: two stages, or a stage
-    /// and an input.
+    /// A shape value has more than one producer: two stages, or a stage and
+    /// an input.
     ShapeProducedTwice(ShapeRef),
-    /// A stage writes part of a result without using a size or presence that
+    /// A stage writes part of a result without using a shape value that
     /// governs that part.
     GoverningShapeUnused {
         stage: u32,
         field: ShapeRef,
     },
-    /// A size or presence of a result has no producer.
+    /// A shape value of a result has no producer.
     ResultShapeUnknown(ShapeRef),
     /// An input port names a slot that is not `Storage::Input`.
     InputPlaneNotInput(Slot),
@@ -397,15 +411,15 @@ pub enum Defect {
     /// describe yet. The kind is valid; a unit cannot carry it across.
     KindUnsupported(PortRef),
     /// A port does not match its kind: its layout does not lay out that
-    /// kind, it gives the wrong number of sizes or of slots, or a size is of
-    /// the wrong sort.
+    /// kind, it gives the wrong number of shape values or of slots, or a
+    /// shape value is of the wrong sort.
     KindMismatch(PortRef),
     /// An input port is not the value of a node.
     InputNotAValue(PortRef),
     /// A selection names an input the unit does not have.
     UnknownInput(PortRef),
-    /// A storage capacity is stated as presence, which is not a size.
-    CapacityNotASize(Slot),
+    /// A storage capacity is stated as presence, which counts nothing.
+    CapacityNotACount(Slot),
     /// Two planes of one value are given the same storage.
     PlaneRepeated {
         port: PortRef,
@@ -417,7 +431,7 @@ pub enum Defect {
         port: PortRef,
         plane: u32,
     },
-    /// Parts of a value with different sizes or presence are placed in one
+    /// Parts of a value with different shape values are placed in one
     /// plane. A plane holds one run of elements, so everything in it shares
     /// one domain and one presence.
     PlaneSharedAcrossParts {
@@ -432,25 +446,25 @@ pub enum Defect {
 /// checks. The tables of kinds and of layouts are well formed and state each
 /// entry once. Every slot and shape field named exists. Each port's kind has
 /// its storage described, its layout lays out that kind, and it gives one
-/// size or presence for each run-time fact and one slot for each plane. A
+/// shape value for each run-time fact and one slot for each plane. A
 /// selection chooses among inputs of the right kinds that are kept one way. No
 /// two planes of a value share storage, and each plane's layout fits inside
 /// one element of its storage. No capacity is stated as presence. No stage
-/// writes an input or an alias, and an alias refers to an input. Each size
-/// and presence has at most one producer. A stage uses only what was
-/// produced before it, and a stage that writes part of a result uses the
-/// sizes and presence that govern that part. Every size a capacity names is
-/// produced before the stage that first writes the storage. Every size and
-/// presence of a result has a producer, except those of a part fixed as
-/// absent, which do not apply.
+/// writes an input or an alias, and an alias refers to an input. Each shape
+/// value has at most one producer. A stage uses only what was produced
+/// before it, and a stage that writes part of a result uses the shape values
+/// that govern that part. Every shape value a capacity names is produced
+/// before the stage that first writes the storage. Every shape value of a
+/// result has a producer, except those of a part fixed as absent, which do
+/// not apply.
 ///
 /// Passing these checks does not make a unit ready to run. They do not show
 /// that every result is written by some stage, that storage is read only
 /// after something wrote it, that what the code writes fits the capacity
 /// stated for it, or that an alignment is usable, and they cannot show that
 /// the code honors the description. They establish an order within the
-/// description. They say nothing about where a size is at run time or
-/// whether the work that produces it has completed.
+/// description. They say nothing about where a shape value is at run time
+/// or whether the work that produces it has completed.
 ///
 /// Decide: how far the runtime trusts code from a supplier it did not build.
 /// Nothing in this contract confines code to the storage it declared.
@@ -463,7 +477,7 @@ impl Checked {
     }
 }
 
-/// Which sizes and presence govern each plane of one port.
+/// Which shape values govern each plane of one port.
 struct Governed<'a> {
     layouts: &'a Layouts,
     measures: &'a Measures,
@@ -579,7 +593,7 @@ impl Unit {
                             }
                         };
                         if presence {
-                            return Err(Defect::CapacityNotASize(Slot(index as u32)));
+                            return Err(Defect::CapacityNotACount(Slot(index as u32)));
                         }
                     }
                 }
@@ -598,10 +612,11 @@ impl Unit {
         let most_planes = u32::try_from(self.storage.len()).unwrap_or(u32::MAX);
         let measures = self.layouts.measure(most_planes).map_err(Defect::Layout)?;
 
-        // A size is produced by the value bound to an input or by one stage.
+        // A shape value is produced by the value bound to an input or by one
+        // stage.
         let mut produced = vec![false; self.shape_fields.len()];
-        // The sizes that govern what each slot holds of a result, and the
-        // sizes results have.
+        // The shape values that govern what each slot holds of a result, and
+        // the shape values results have.
         let mut governs: Vec<Vec<ShapeRef>> = vec![Vec::new(); self.storage.len()];
         let mut owed: Vec<ShapeRef> = Vec::new();
 
@@ -681,7 +696,7 @@ impl Unit {
                 }
             }
 
-            // Which sizes and presence govern each plane.
+            // Which shape values govern each plane.
             let mut governed = Governed {
                 layouts: &self.layouts,
                 measures: &measures,
@@ -748,8 +763,8 @@ impl Unit {
             }
         }
 
-        // A stage consumes only what was produced before it, and each size has
-        // one producer.
+        // A stage consumes only what was produced before it, and each shape
+        // value has one producer.
         let mut provided = vec![false; self.storage.len()];
         for (index, stage) in self.stages.iter().enumerate() {
             let index = index as u32;
@@ -776,7 +791,7 @@ impl Unit {
                         slot: *slot,
                     });
                 };
-                // Providing the storage consumes the sizes its capacity names.
+                // Providing the storage consumes what its capacity names.
                 if !std::mem::replace(&mut provided[slot.0 as usize], true) {
                     for entry in &need.capacity {
                         match entry {
@@ -787,7 +802,7 @@ impl Unit {
                         }
                     }
                 }
-                // Filling part of a result consumes the sizes that govern it.
+                // Filling part of a result consumes what governs it.
                 for field in &governs[slot.0 as usize] {
                     if !stage.uses.contains(field) {
                         return Err(Defect::GoverningShapeUnused {
@@ -844,8 +859,8 @@ mod tests {
         Storage::Output(need(element_bytes, vec![cells(4)]))
     }
 
-    /// A stage that writes the given slots, uses the given sizes and
-    /// determines the given sizes.
+    /// A stage that writes the given slots, uses the given shape values and
+    /// determines the given shape values.
     fn stage(writes: &[u32], uses: &[u32], determines: &[u32]) -> Stage {
         let fields = |fields: &[u32]| fields.iter().map(|field| ShapeRef(*field)).collect();
         Stage {
@@ -976,11 +991,11 @@ mod tests {
         // A stage cannot produce the capacity of storage it is writing.
         let same = one_result(at(0), at(0), vec![stage(&[0], &[0], &[0])]);
         assert_eq!(same.check().err(), Some(late));
-        // One stage determines the size and the next fills.
+        // One stage determines the domain and the next fills.
         let stages = vec![stage(&[], &[], &[0]), stage(&[0], &[0], &[])];
         assert!(one_result(at(0), at(0), stages).check().is_ok());
 
-        // No Array is sized from its own contents. A stage that fills a
+        // No Array takes its shape from its own contents. A stage that fills a
         // result uses its domain, so it cannot also determine it, whatever
         // storage it was given.
         let own = one_result(at(0), cells(100), vec![stage(&[0], &[0], &[0])]);
@@ -995,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn several_ports_may_share_a_size_but_it_has_one_producer() {
+    fn several_ports_may_share_a_shape_value_but_it_has_one_producer() {
         // An input Array and a Struct of two Arrays, all with the domain in
         // shape field 0. The input produces it; nothing restates it.
         let shared = |stages: Vec<Stage>| {
@@ -1022,11 +1037,11 @@ mod tests {
         };
         assert!(shared(vec![stage(&[1, 2], &[0], &[])]).check().is_ok());
 
-        // A stage may not determine a size an input brings.
+        // A stage may not determine a shape value an input brings.
         let twice = Some(Defect::ShapeProducedTwice(ShapeRef(0)));
         let again = vec![stage(&[], &[], &[0]), stage(&[1, 2], &[0], &[])];
         assert_eq!(shared(again).check().err(), twice);
-        // Nor may two stages determine one size.
+        // Nor may two stages determine one shape value.
         let twice = Some(Defect::ShapeProducedTwice(ShapeRef(1)));
         let both = vec![stage(&[], &[], &[1]), stage(&[], &[], &[1])];
         assert_eq!(shared(both).check().err(), twice);
@@ -1160,10 +1175,10 @@ mod tests {
         let unit = optional(false, vec![at(0), at(1)], at(1), measure_then_fill());
         assert!(unit.check().is_ok());
 
-        // Presence is not a size, so it cannot state how much storage to provide.
+        // Presence counts nothing, so it cannot state how much storage to provide.
         let presence = ShapeEntry::Fixed(ShapeValue::Presence(true));
         let unit = optional(false, vec![at(0), at(1)], presence, measure_then_fill());
-        assert_eq!(unit.check().err(), Some(Defect::CapacityNotASize(Slot(0))));
+        assert_eq!(unit.check().err(), Some(Defect::CapacityNotACount(Slot(0))));
 
         // An Optional never directly holds an Optional.
         let unit = optional(true, vec![at(0), at(1)], cells(100), measure_then_fill());
@@ -1172,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn a_result_fixed_as_absent_needs_no_sizes() {
+    fn a_result_fixed_as_absent_owes_no_shape() {
         // Nothing determines the domain and nothing writes the storage.
         let absent = ShapeEntry::Fixed(ShapeValue::Presence(false));
         let unit = optional(false, vec![absent, at(1)], cells(0), Vec::new());
@@ -1220,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn a_struct_may_fill_one_array_then_size_and_fill_the_other() {
+    fn a_struct_may_fill_one_array_then_shape_and_fill_the_other() {
         // Fill the first, work out the second's domain from it, fill the second.
         let staged = vec![
             stage(&[0], &[], &[]),
@@ -1247,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn every_result_sharing_storage_is_sized_before_it_is_written() {
+    fn every_result_sharing_storage_has_its_shape_before_it_is_written() {
         // Two results in one slot. The first has a fixed domain; the second's
         // is determined by the very stage that writes the slot.
         let mut tables = Tables::default();
@@ -1383,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_may_be_stated_by_the_size_determined_or_by_a_bound() {
+    fn capacity_may_be_the_shape_determined_or_a_bound() {
         // An Array read from slot 0, whose domain is shape field 0, and a
         // result in slot 1 whose domain, field 1, a first stage determines
         // and a second stage uses to fill it. This is the shape of a filter,

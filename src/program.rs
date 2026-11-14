@@ -78,6 +78,10 @@ pub enum Root {
 }
 
 /// One update block and the States it writes.
+///
+/// An update is one atomic transition of a run. Every State the block writes
+/// gets its next value, each computed from the States as they stand at one
+/// version, and the run moves to the next version with all of them at once.
 #[derive(Clone, Debug)]
 pub struct Update {
     pub id: UpdateId,

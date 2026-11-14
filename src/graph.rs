@@ -93,9 +93,9 @@ pub struct Plan {
 /// does not require a fresh copy: a result may share storage that already
 /// exists and will not change.
 ///
-/// No indexed value is sized from its own contents. A domain may depend on
-/// data, but only on values computed before it is filled, such as a site of
-/// Ints held by an upstream Array.
+/// No indexed value takes its domain from its own contents. A domain may
+/// depend on data, but only on values computed before it is filled, such as
+/// a site of Ints held by an upstream Array.
 ///
 /// Gap: an Array unbounded on some axis cannot be stored whole, yet every
 /// result is stored. Whether a finite window of one is a separate finite

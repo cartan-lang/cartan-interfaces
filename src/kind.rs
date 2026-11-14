@@ -56,16 +56,16 @@ pub enum AxisKind {
 }
 
 /// A kind of fact about a value that is only known at run time. A unit
-/// states each one, as a fixed value or by naming it in its table of sizes.
+/// states each one, as a fixed shape value or by naming it in its table.
 ///
 /// A value's kind fixes its structure at compile time, including the form of
 /// each Array axis. What compile time cannot fix is where an axis starts, how
 /// many elements there are, and whether an Optional value is present.
 ///
-/// Presence shares the record with the sizes but is not a size. It counts
+/// Presence is a shape value like a length or a domain, but it counts
 /// nothing, and an absent value is not an empty one. An absent value owns no
-/// storage and its sizes do not apply: they are neither read nor used to
-/// decide how much storage to provide.
+/// storage, and its lengths and domains do not apply: they are neither read
+/// nor used to decide how much storage to provide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeField {
     /// Whether an Optional value is present.
@@ -88,7 +88,7 @@ pub struct KindRef(pub u32);
 /// One kind, stated in terms of references to the kinds it is built from.
 ///
 /// A fiber is what one site of an Array holds: plain data of fixed width,
-/// with no references and no size that is only known at run time. The fibers
+/// with no references and nothing that is only known at run time. The fibers
 /// are the scalars, `Rational`, `Complex`, `Color`, `Vector`, the rotation
 /// groups, `Mat`, `Form`, `Metric`, `Product` and `Sum`. An Array, an
 /// Optional, a Struct and a Tuple are kinds but not fibers.

@@ -34,10 +34,11 @@ everything an application needs from a runtime:
 - `program` names what a source declares: States, Params, bindings and update
   blocks.
 - `unit` describes one piece of compiled code: its inputs and results, their
-  kinds, sizes and physical layout, the storage it needs and in which memory,
-  and its stages. A stage is one compiled computation and the only execution
-  boundary. A stage consumes only what was produced before it, sizes and
-  presence included, and each size or presence has one producer.
+  kinds, shape and physical layout, the storage it needs and in which memory,
+  and its stages. A stage is one launch of compiled code and the only
+  execution boundary. A stage consumes only what was produced before it,
+  shape values included, and each shape value has one producer. A shape value
+  is a List length, an Array domain or an Optional's presence.
 - `supply` is what a compiler offers a runtime: units on request.
 - `session` is what an application asks of a runtime and what a runtime reports.
 

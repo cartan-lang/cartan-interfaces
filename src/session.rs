@@ -34,8 +34,8 @@ pub enum Stop {
     /// The unit names a memory this runtime has not set up.
     Unplaced(Memory),
     /// The code did not do what its own description says, such as never
-    /// producing a size it determines. This is a defect in a code generator,
-    /// not a run-time outcome of the program.
+    /// producing a shape value it determines. This is a defect in a code
+    /// generator, not a run-time outcome of the program.
     Invariant,
     /// A device or its driver failed.
     Device,
@@ -46,7 +46,7 @@ pub enum Stop {
 /// A session coordinates a supplier and the runtime. It is not another
 /// evaluator, and nothing outside the runtime writes State.
 ///
-/// Gap: this is a placeholder and its methods are provisional. Launching,
+/// Gap: this is a placeholder and its methods are provisional. Starting a run,
 /// parameters, how publication is requested or offered, delivery of results
 /// and stopping conditions are not written yet. `advance` states a number of
 /// updates, not how they are run or which update block runs when there are
@@ -58,6 +58,12 @@ pub trait Session {
     /// A computed value. Reading its bytes back is a separate, explicit step.
     type Value;
 
+    /// Complete this many updates and report the version reached.
+    ///
+    /// A handshake is the blocking round trip in which the runtime waits for
+    /// one update to finish and accepts it before it starts the next. Asking
+    /// for several updates at once is what lets a runtime avoid a handshake
+    /// on every update.
     fn advance(&mut self, updates: u64) -> Result<Version, Stop>;
 
     fn observe(&mut self, nodes: &[Node]) -> Result<Vec<(Node, Self::Value)>, Stop>;
