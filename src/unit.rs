@@ -40,6 +40,18 @@ impl ShapeValue {
         }
     }
 
+    /// Whether this says an Optional value is absent. An absent value has no
+    /// storage and no other shape values.
+    pub fn is_absent(&self) -> bool {
+        matches!(self, ShapeValue::Presence(false))
+    }
+
+    /// Whether this is a length or a domain that counts no elements. An
+    /// empty value is present; an absent one is not empty.
+    pub fn is_empty(&self) -> bool {
+        self.count() == Some(0)
+    }
+
     pub fn is(&self, field: ShapeField) -> bool {
         match (self, field) {
             (ShapeValue::Presence(_), ShapeField::Presence) => true,
@@ -364,6 +376,7 @@ pub struct Unit {
     pub storage: Vec<Storage>,
     /// Every shape value not fixed at compile time, each stated once.
     pub shape_fields: Vec<ShapeField>,
+    /// In list order: an order in which the stages can run.
     pub stages: Vec<Stage>,
 }
 
@@ -496,11 +509,23 @@ pub enum Defect {
 /// Decide: how far the runtime trusts code from a supplier it did not build.
 /// Nothing in this contract confines code to the storage it declared.
 #[derive(Clone, Debug)]
-pub struct Checked(Unit);
+pub struct Checked {
+    unit: Unit,
+    governs: Vec<Vec<ShapeRef>>,
+}
 
 impl Checked {
     pub fn unit(&self) -> &Unit {
-        &self.0
+        &self.unit
+    }
+
+    /// The shape values that govern what a slot holds of a result. A domain
+    /// governs the planes of its Array, and a presence governs everything
+    /// its Optional holds. A stage that writes the slot must use each of
+    /// them. Empty where the slot holds no part of a result, or a part
+    /// whose shape is fixed.
+    pub fn governing(&self, slot: Slot) -> &[ShapeRef] {
+        self.governs.get(slot.0 as usize).map_or(&[], Vec::as_slice)
     }
 
     /// What produces a shape value, or nothing if the description gives it
@@ -509,15 +534,15 @@ impl Checked {
         let named = ShapeEntry::Runtime(shape);
         let brings = |input: &InputPort| input.shape.contains(&named);
         let determines = |stage: &Stage| stage.determines.contains(&shape);
-        let input = self.0.inputs.iter().position(brings);
-        let stage = self.0.stages.iter().position(determines);
+        let input = self.unit.inputs.iter().position(brings);
+        let stage = self.unit.stages.iter().position(determines);
         let input = input.map(|input| Producer::Input(input as u32));
         input.or(stage.map(|stage| Producer::Stage(stage as u32)))
     }
 
     /// Everything the description says depends on a shape value.
     pub fn consumers(&self, shape: ShapeRef) -> Vec<Consumer> {
-        let unit = &self.0;
+        let unit = &self.unit;
         let named = ShapeEntry::Runtime(shape);
         let mut consumers = Vec::new();
         for (index, stage) in unit.stages.iter().enumerate() {
@@ -941,7 +966,10 @@ impl Unit {
         }
         match owed.into_iter().find(|field| !produced[field.0 as usize]) {
             Some(field) => Err(Defect::ResultShapeUnknown(field)),
-            None => Ok(Checked(self)),
+            None => Ok(Checked {
+                unit: self,
+                governs,
+            }),
         }
     }
 }
@@ -1370,7 +1398,10 @@ mod tests {
             stage(&[], &[], &[0]),
             stage(&[1], &[0], &[]),
         ];
-        assert!(pair(staged, (1, 0)).check().is_ok());
+        let staged = pair(staged, (1, 0)).check().unwrap();
+        // The second Array's domain governs its plane. The first is fixed.
+        assert_eq!(staged.governing(Slot(1)), [ShapeRef(0)]);
+        assert_eq!(staged.governing(Slot(0)), []);
 
         // Filling the second before its domain is produced is refused.
         let early = vec![stage(&[0, 1], &[0], &[]), stage(&[], &[], &[0])];
@@ -1458,6 +1489,11 @@ mod tests {
         };
         assert_eq!(domain(&[0, u64::MAX, 2]).count(), Some(0));
         assert_eq!(domain(&[u64::MAX, 2, 0]).count(), Some(0));
+
+        // Empty is not absent, and absent is not empty.
+        let (empty, absent) = (domain(&[4, 0]), ShapeValue::Presence(false));
+        assert!(empty.is_empty() && !empty.is_absent());
+        assert!(absent.is_absent() && !absent.is_empty());
     }
 
     /// A unit that computes nothing: `current = state ?? initial`, with the

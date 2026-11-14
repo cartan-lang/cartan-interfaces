@@ -41,7 +41,8 @@ pub enum Stop {
     Device,
 }
 
-/// One running program, as an application drives it.
+/// One run: one execution of a program by a runtime, from its first State
+/// onward, as an application drives it.
 ///
 /// A session coordinates a supplier and the runtime. It is not another
 /// evaluator, and nothing outside the runtime writes State.
@@ -55,7 +56,9 @@ pub enum Stop {
 /// refused, or that cannot be compiled, need not end the run and has no
 /// result type of its own yet.
 pub trait Session {
-    /// A computed value. Reading its bytes back is a separate, explicit step.
+    /// A retained value: one the runtime keeps after the stages that
+    /// produced it have finished, with its shape values. Reading its bytes
+    /// back is a separate, explicit step.
     type Value;
 
     /// Complete this many updates and report the version reached.

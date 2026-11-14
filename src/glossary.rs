@@ -1,14 +1,14 @@
 //! Every official term of these contracts, in one place.
 //!
 //! A term that is a type is defined once, in the documentation of that type,
-//! and is listed here by re-export. A term that is a field or a variant is
-//! defined where it is declared, and is listed here by a link. A term that is
-//! neither is defined here and nowhere else.
+//! and is listed here by re-export. A term that is a field, a variant or a
+//! method is defined where it is declared, and is listed here by a link. A
+//! term that is none of these is defined here and nowhere else.
 //!
 //! No other document defines these terms. A word the contracts need that is
 //! not here is added here first.
 //!
-//! # Terms that are fields or variants
+//! # Terms that are fields, variants or methods
 //!
 //! | Term | Declared in |
 //! |---|---|
@@ -26,12 +26,25 @@
 //! | Initial value, next value | [`Demand`] |
 //! | Fiber | [`Definition`] |
 //! | Shortage, cancellation | [`Stop`] |
+//! | Run | [`Session`] |
+//! | Retained value | [`Session::Value`] |
+//! | Absent, empty | [`ShapeValue::is_absent`], [`ShapeValue::is_empty`] |
+//! | Governs | [`Checked::governing`] |
+//! | List order | [`Unit::stages`] |
 //!
 //! # Terms that are not Rust items
 //!
-//! ## Run
+//! Each of these stays a word for one of four reasons.
 //!
-//! One execution of a program by a runtime, from its first State onward.
+//! - It names something that happens inside a runtime and crosses no
+//!   boundary: runner, handshake, sync point, submission and completion,
+//!   readback.
+//! - It names something a description never states: allocation size.
+//! - It names a rule or a condition and not a thing: applies, shape before
+//!   fill, capacity bound, fit. A rule shows up as a check and its defects.
+//! - It waits on a part of a contract that is not written yet: launch, which
+//!   becomes a type with the calling convention of a stage, and site, which
+//!   becomes one when the sites asked for can be stated.
 //!
 //! ## Launch
 //!
@@ -63,11 +76,6 @@
 //!
 //! The host reading something a device produced.
 //!
-//! ## Retained value
-//!
-//! A value a runtime keeps after the stages that produced it have finished.
-//! It keeps its shape values with it.
-//!
 //! ## Site
 //!
 //! One position of an indexed value: an index of a List or a point of the
@@ -78,22 +86,10 @@
 //! The bytes of an allocation. No description states one. A runtime works it
 //! out from an element size and a [`Capacity`].
 //!
-//! ## Absent and empty
-//!
-//! An absent value is an Optional whose presence is false. It has no storage
-//! and no other shape values. An empty value is present, with a length of
-//! zero or a domain that has an axis of zero extent.
-//!
 //! ## Applies
 //!
 //! A shape value applies when the value it describes exists. Those within an
 //! Optional that is absent do not apply. See [`ShapeEntry`].
-//!
-//! ## Governs
-//!
-//! A shape value governs the planes that hold what it describes. A domain
-//! governs the planes of its Array, and a presence governs everything its
-//! Optional holds. See [`Stage`].
 //!
 //! ## Shape before fill
 //!
@@ -109,11 +105,6 @@
 //!
 //! What code writes into a slot fits when it stays within the slot's
 //! [`Capacity`].
-//!
-//! ## List order
-//!
-//! The order in which a unit lists its stages, which is an order in which
-//! they can run. See [`Stage`].
 //!
 //! ## Gap and Decide
 //!
