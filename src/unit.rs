@@ -100,6 +100,14 @@ pub struct Slot(pub u32);
 /// A unit never asks for a number of bytes, and it never asks at all: this
 /// description is the request. The runtime reads it, with the sizes in the
 /// shape record, and provides the storage before the stage that writes it.
+///
+/// The storage a slot is given may be a region of a larger allocation. The
+/// runtime passes it as a base and an offset from that base, and a whole
+/// allocation is the case where the offset is zero. The region starts where
+/// `align` allows and holds the stated capacity. Code may not assume that a
+/// slot begins an allocation or that two slots lie in different ones, and it
+/// reads and writes nothing outside the regions it was given. The regions of
+/// different slots do not overlap, except where one slot is an alias.
 #[derive(Clone, Debug)]
 pub struct Need {
     pub memory: Memory,
@@ -205,9 +213,11 @@ pub struct Selection {
 /// needs nothing from the runtime while it runs. Where repetition happens is
 /// not part of this contract.
 ///
-/// Gap: the calling convention of a stage on each target is not written yet:
-/// how the entry is named, how slots and the shape record are passed, and the
-/// extent a parallel stage is dispatched over.
+/// Each slot is passed to a stage as a base and an offset.
+///
+/// Gap: the rest of the calling convention of a stage on each target is not
+/// written yet: what a base is, how the entry is named, how the shape record
+/// is passed, and the extent a parallel stage is dispatched over.
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub reads: Vec<Slot>,
