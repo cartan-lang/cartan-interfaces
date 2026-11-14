@@ -87,6 +87,11 @@ pub struct ShapeRef(pub u32);
 /// specialization, making a selection, or answering an observation. A shape
 /// value that only compiled code consumes need not be read by the runtime.
 ///
+/// Before such an operation uses a shape value, the runtime must hold the
+/// value that applies to the inputs being used. If it holds no valid one, it
+/// obtains it before that operation proceeds. This dependency does not by
+/// itself make unrelated work wait.
+///
 /// A shape value that was never produced is different from a presence that
 /// says a value is absent. Producing and consuming apply only where a shape
 /// value applies. Those within an Optional that turns out absent are not
@@ -292,6 +297,17 @@ pub struct Selection {
 /// stage that writes part of a result uses the shape values that govern that
 /// part, so it cannot be the stage that determines them. One stage
 /// determines, and a later stage fills.
+///
+/// For fixed code, what a stage produces depends only on what it consumes,
+/// and its description lists all of that. A stage that depends on what
+/// storage held before the stage wrote it lists that storage among what it
+/// reads. A runtime that holds a shape value produced from the same consumed
+/// values may use it without waiting for the stage to produce it again. That
+/// does not by itself let the runtime leave the stage out, since whatever
+/// else the stage writes is still owed. Where everything a stage produces is
+/// already held and valid, the stage need not run. How a runtime knows that
+/// consumed values are unchanged is its own business. Treating any write as
+/// a change is always sound.
 ///
 /// Stages are listed in an order in which they can run. The runtime owns the
 /// order of execution. It may run stages in another order, or overlapped,
