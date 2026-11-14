@@ -59,8 +59,8 @@ pub struct ShapeRef(pub u32);
 ///
 /// An entry that has not been filled is different from one that says a value
 /// is absent. The runtime knows the presence of an input before the unit
-/// runs. It knows the presence of a result only once the stage that
-/// determines it has returned, so storage it provided beforehand may go
+/// runs. It can know the presence of a result only once the stage that
+/// determines it has completed, so storage it provided beforehand may go
 /// unused. The sizes of an absent value are left unfilled.
 ///
 /// In an input port, `Fixed` is a specialization the runtime verifies against
@@ -74,10 +74,10 @@ pub struct ShapeRef(pub u32);
 /// memory, so that later device code reads a size without the host, is not
 /// designed.
 ///
-/// Gap: these rules say when a size or presence has been determined. They do
-/// not say who can read it then. On a device, a stage having returned may
-/// mean only that its work was submitted, and the host cannot read what the
-/// stage determined until that work has completed.
+/// Gap: on a device, the work of a stage may be submitted well before it has
+/// completed. This contract does not yet separate the two. It says in what
+/// order sizes and presence are determined, not when the host, or later code
+/// on the device, can read them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeEntry {
     Fixed(ShapeValue),
@@ -191,9 +191,10 @@ pub struct Port {
 /// present the runtime need not hold it at all.
 ///
 /// The runtime makes the choice, so it must be able to read the presence of
-/// `first` before the unit runs. If that presence was determined on a device,
-/// the runtime waits for it. Choosing on the device, or demanding the
-/// fallback conditionally there, is not designed.
+/// `first` before the unit runs, and it waits if it cannot yet.
+///
+/// Gap: choosing on a device, or demanding the fallback conditionally there,
+/// is not designed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     /// What this result answers.
@@ -230,18 +231,18 @@ pub struct Selection {
 /// needs nothing from the runtime while it runs. Where repetition happens is
 /// not part of this contract.
 ///
-/// A stage that reads no storage can determine a size only from other sizes.
-/// That is how a size computed from sizes is stated, such as a domain two
-/// cells smaller than an input's. Such a stage needs no device.
-///
-/// Gap: nothing says where a stage runs. The code is emitted for one target,
-/// so a description cannot yet say that such a stage runs on the host. On a
-/// device its result would have to be read back like one computed from data.
+/// A stage need not read storage to determine a size. It may work one out
+/// from sizes and presence already in the shape record, such as a domain two
+/// cells smaller than an input's.
 ///
 /// Gap: a stage lists the storage it reads but not the sizes and presence it
 /// reads, nor which of them set the extent it is dispatched over. Without
-/// that the runtime cannot tell which of them must be available, and where,
-/// before the stage starts.
+/// that, a description cannot show what a size depends on, and the runtime
+/// cannot tell what must be available, and where, before the stage starts.
+///
+/// Gap: nothing says where a stage runs. The code is emitted for one target,
+/// so a stage whose inputs are all available on the host cannot be placed
+/// there.
 ///
 /// Each slot is passed to a stage as a base and an offset.
 ///
@@ -424,53 +425,6 @@ impl Checked {
     pub fn unit(&self) -> &Unit {
         &self.0
     }
-
-    /// The sizes the runtime must learn before it can provide storage: each
-    /// size that a stage determines and that the capacity of storage names.
-    /// On a device, each is a wait for that stage to complete.
-    ///
-    /// A result kept in storage sized for a bound the runtime already knows
-    /// is not listed. Its true size can stay where the code left it until
-    /// something else needs it.
-    ///
-    /// This is not every wait a run can incur. Gap: the runtime may also need
-    /// a size or presence to set the extent of a dispatch, to make a
-    /// selection, to reuse storage safely or to answer an observation. A
-    /// description does not state those yet.
-    pub fn awaited(&self) -> Vec<Awaited> {
-        let unit = &self.0;
-        let mut awaited = Vec::new();
-        for (index, storage) in unit.storage.iter().enumerate() {
-            let (Storage::Output(need) | Storage::Scratch(need)) = storage else {
-                continue;
-            };
-            for entry in &need.capacity {
-                let ShapeEntry::Runtime(field) = entry else {
-                    continue;
-                };
-                let determines = |stage: &Stage| stage.determines.contains(field);
-                if let Some(stage) = unit.stages.iter().position(determines) {
-                    awaited.push(Awaited {
-                        field: *field,
-                        stage: stage as u32,
-                        slot: Slot(index as u32),
-                    });
-                }
-            }
-        }
-        awaited
-    }
-}
-
-/// A size the runtime must learn before it can provide storage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Awaited {
-    /// The size.
-    pub field: ShapeRef,
-    /// The stage that determines it.
-    pub stage: u32,
-    /// The storage whose capacity names it.
-    pub slot: Slot,
 }
 
 /// Which sizes and presence govern each plane of one port.
@@ -1312,68 +1266,33 @@ mod tests {
         assert_eq!(unit.check().err(), Some(Defect::UnknownInput(selected)));
     }
 
-    /// A unit that reads an Array of Reals in slot 0, whose domain is shape
-    /// field 0, and fills another in slot 1, whose domain is shape field 1.
-    /// A first stage reads the given slots and determines field 1.
-    fn resized(measure_reads: &[u32], capacity: ShapeEntry) -> Checked {
+    #[test]
+    fn a_result_may_be_smaller_than_the_storage_stated_for_it() {
+        // An Array read from slot 0, whose domain is shape field 0, and a
+        // result in slot 1 whose domain, field 1, a first stage determines.
+        // The result's storage is stated by the input's size, not its own,
+        // as for a filter that keeps at most as many elements as it reads.
+        // Nothing the code computes is needed to provide that storage. The
+        // check does not show that the result fits.
         let mut tables = Tables::default();
         let (kind, layout) = tables.reals();
         let input = tables.port(kind, layout, vec![at(0)], &[0]);
         let output = tables.port(kind, layout, vec![at(1)], &[1]);
-        let measure = Stage {
-            reads: measure_reads.iter().map(|slot| Slot(*slot)).collect(),
-            ..stage(&[], &[1])
-        };
-        let fill = Stage {
+        let reading = |stage: Stage| Stage {
             reads: vec![Slot(0)],
-            ..stage(&[1], &[])
+            ..stage
         };
         let unit = Unit {
             inputs: vec![input],
             outputs: vec![output],
             storage: vec![
                 Storage::Input(need(8, vec![at(0)])),
-                Storage::Output(need(8, vec![capacity])),
+                Storage::Output(need(8, vec![at(0)])),
             ],
             shape_fields: vec![ShapeField::Domain { rank: 1 }; 2],
-            stages: vec![measure, fill],
+            stages: vec![reading(stage(&[], &[1])), reading(stage(&[1], &[]))],
             ..tables.unit()
         };
-        unit.check().unwrap()
-    }
-
-    #[test]
-    fn a_size_computed_from_sizes_is_determined_without_reading_storage() {
-        // A result two cells smaller than its input. The stage that works
-        // out its domain reads no storage, so it depends on sizes alone.
-        let shrink = resized(&[], at(1));
-        assert!(shrink.unit().stages[0].reads.is_empty());
-        // The description cannot yet place that stage on the host, so the
-        // runtime still has to learn the size from wherever the code ran.
-        let wait = Awaited {
-            field: ShapeRef(1),
-            stage: 0,
-            slot: Slot(1),
-        };
-        assert_eq!(shrink.awaited(), [wait]);
-    }
-
-    #[test]
-    fn a_data_sized_result_within_a_known_bound_needs_no_size_from_the_code() {
-        // A filter keeps at most as many elements as it reads. With storage
-        // for that many, the runtime provides it before anything runs, and
-        // the count the first stage works out is read only by the second.
-        let bounded = resized(&[0], at(0));
-        assert_eq!(bounded.awaited(), []);
-
-        // With storage sized exactly, the runtime must learn the count
-        // between the two stages.
-        let exact = resized(&[0], at(1));
-        let wait = Awaited {
-            field: ShapeRef(1),
-            stage: 0,
-            slot: Slot(1),
-        };
-        assert_eq!(exact.awaited(), [wait]);
+        assert!(unit.check().is_ok());
     }
 }
