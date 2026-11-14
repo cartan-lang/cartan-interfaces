@@ -300,7 +300,7 @@ impl Kinds {
     ///
     /// Gap: the storage of `SO2`, `SO3`, `Mat`, `Form` and `Metric` is not
     /// described. A port of such a kind is refused as unsupported.
-    pub fn leaf_counts(&self) -> Vec<Option<u64>> {
+    pub fn scalar_counts(&self) -> Vec<Option<u64>> {
         let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.definitions.len());
         for definition in &self.definitions {
             let of = |kind: &KindRef| counts[kind.0 as usize];
@@ -333,61 +333,6 @@ impl Kinds {
             counts.push(count);
         }
         counts
-    }
-
-    /// The scalars of one element of a kind, in order, or nothing if its
-    /// storage is not described. A port lists one leaf for each, in this
-    /// order.
-    ///
-    /// A vector gives its positions first to last. A product, a struct and a
-    /// tuple give their members as declared. A sum gives an Int tag holding
-    /// the active variant's position, then the scalars of every variant's
-    /// payload in declared order; the scalars of the variants that are not
-    /// active hold zero.
-    ///
-    /// This writes a repeated kind out in full. Ask `leaf_counts` first.
-    pub fn leaves(&self, kind: KindRef) -> Option<Vec<Primitive>> {
-        let mut leaves = Vec::new();
-        self.push_leaves(kind, &mut leaves)?;
-        Some(leaves)
-    }
-
-    fn push_leaves(&self, kind: KindRef, leaves: &mut Vec<Primitive>) -> Option<()> {
-        let definition = self.get(kind)?;
-        match definition {
-            Definition::Bool => leaves.push(Primitive::Bool),
-            Definition::Int => leaves.push(Primitive::Int),
-            Definition::Real => leaves.push(Primitive::Real),
-            Definition::Rational => leaves.extend([Primitive::Int; 2]),
-            Definition::Complex => leaves.extend([Primitive::Real; 2]),
-            Definition::Color => leaves.extend([Primitive::Real; 4]),
-            Definition::Vector { element, count } => {
-                for _ in 0..*count {
-                    self.push_leaves(*element, leaves)?;
-                }
-            }
-            Definition::Sum(_) => {
-                leaves.push(Primitive::Int);
-                for payload in Self::children(definition) {
-                    self.push_leaves(payload, leaves)?;
-                }
-            }
-            Definition::Product(_)
-            | Definition::Struct(_)
-            | Definition::Tuple(_)
-            | Definition::Array { .. }
-            | Definition::Optional(_) => {
-                for member in Self::children(definition) {
-                    self.push_leaves(member, leaves)?;
-                }
-            }
-            Definition::SO2
-            | Definition::SO3
-            | Definition::Mat { .. }
-            | Definition::Form { .. }
-            | Definition::Metric { .. } => return None,
-        }
-        Some(())
     }
 
     /// How many run-time facts a value of each kind has, one answer per
@@ -550,7 +495,7 @@ mod tests {
 
         // Each level has two Arrays of two scalars and one Real.
         assert_eq!(
-            kinds.leaf_counts()[pair.0 as usize],
+            kinds.scalar_counts()[pair.0 as usize],
             Some(2 * 2 * (2 + 2 + 1))
         );
         // Every Array member keeps its own domain: eight in all.
@@ -569,7 +514,7 @@ mod tests {
         assert_eq!(kinds.check(), Ok(()));
         assert_eq!(kinds.definitions.len(), 41);
         // A million million scalars, counted without writing any out.
-        assert_eq!(kinds.leaf_counts()[kind.0 as usize], Some(1 << 40));
+        assert_eq!(kinds.scalar_counts()[kind.0 as usize], Some(1 << 40));
         // Comparing it with a copy in another table visits each pair once.
         assert!(kinds.same(kind, &kinds.clone(), kind));
     }
@@ -663,28 +608,9 @@ mod tests {
         ])));
         assert_eq!(kinds.check(), Ok(()));
         // The answer carries through anything built from it.
-        assert_eq!(kinds.leaf_counts(), [Some(1), Some(3), None, None]);
-        assert_eq!(kinds.leaves(pose), None);
-        assert_eq!(kinds.leaves(at), Some(vec![Primitive::Real; 3]));
-    }
-
-    #[test]
-    fn a_sum_stores_a_tag_then_every_payload() {
-        let mut kinds = Kinds::default();
-        let real = kinds.define(Definition::Real);
-        let complex = kinds.define(Definition::Complex);
-        let shape = kinds.define(Definition::Sum(vec![
-            ("Point".to_string(), None),
-            ("Segment".to_string(), Some(real)),
-            ("Phase".to_string(), Some(complex)),
-        ]));
-        assert_eq!(kinds.check(), Ok(()));
-        let expected = [
-            Primitive::Int,
-            Primitive::Real,
-            Primitive::Real,
-            Primitive::Real,
-        ];
-        assert_eq!(kinds.leaves(shape), Some(expected.to_vec()));
+        let counts = kinds.scalar_counts();
+        assert_eq!(counts[at.0 as usize], Some(3));
+        assert_eq!(counts[facing.0 as usize], None);
+        assert_eq!(counts[pose.0 as usize], None);
     }
 }

@@ -28,6 +28,9 @@ everything an application needs from a runtime:
   place in it, so a kind used in many places is stated once. Naming a fiber
   obliges no component to support it; where the storage of a fiber is not
   described, a unit carrying it is refused as unsupported.
+- `layout` says how a value is kept in storage: which planes it uses and where
+  each part sits in an element. It follows the kind's structure and is stated
+  once in the same way, so a layout that repeats is written once.
 - `program` names what a source declares: States, Params, bindings and update
   blocks.
 - `unit` describes one piece of compiled code: its inputs and results, their

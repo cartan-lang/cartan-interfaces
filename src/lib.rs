@@ -3,8 +3,8 @@
 //! Each module is one component's side: the types it owns and what it offers
 //! the others. Everything is plain description with no dependencies.
 //!
-//! The crate has two layers. The runtime-facing modules, `kind`, `program`,
-//! `unit`, `supply` and `session`, are everything the runtime needs from a compiler
+//! The crate has two layers. The runtime-facing modules, `kind`, `layout`,
+//! `program`, `unit`, `supply` and `session`, are everything the runtime needs from a compiler
 //! and everything an application needs from the runtime. They import nothing
 //! from the other modules, so a compiler built from other components can
 //! implement [`supply::Supplier`] and be run by the same runtime. Building
@@ -25,6 +25,8 @@
 
 // The runtime-facing layer.
 pub mod kind;
+
+pub mod layout;
 
 pub mod program;
 
