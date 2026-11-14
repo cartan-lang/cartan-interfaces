@@ -1,6 +1,6 @@
 //! The description of one piece of compiled code.
 
-use crate::kind::{KindDefect, KindRef, Kinds, ShapeField};
+use crate::kind::{Definition, KindDefect, KindRef, Kinds, ShapeField};
 use crate::layout::{Layout, LayoutDefect, LayoutRef, Layouts, Measures};
 use crate::program::Root;
 
@@ -119,12 +119,8 @@ pub enum Storage {
     Input(Need),
     /// A plane of a result. Written by this unit, then handed to the runtime.
     Output(Need),
-    /// A result plane that is an input plane unchanged. Shares its storage.
-    ///
-    /// Decide: an alias names one fixed input. A result that is one of two
-    /// inputs depending on a run-time fact, such as an Optional State when
-    /// present and its initial value otherwise, cannot be expressed without
-    /// copying.
+    /// A plane of a computed result that is an input plane unchanged. Shares
+    /// its storage. A result that is a whole input value is a `Selection`.
     Alias(Slot),
     /// Private to one run of the unit. It has no identity outside it.
     Scratch(Need),
@@ -153,6 +149,36 @@ pub struct Port {
     /// The slots that hold the value, one for each plane of the layout. No
     /// two planes of one value share storage.
     pub planes: Vec<Slot>,
+}
+
+/// A result that is one of the unit's inputs, unchanged.
+///
+/// The result is the value itself: its sizes, its layout and its storage.
+/// Nothing is computed and nothing is copied.
+///
+/// With no `otherwise`, the result is the input `first`. This is how a unit
+/// answers with a State as it stands.
+///
+/// With an `otherwise`, `first` is an Optional input. When it is present the
+/// result is what it holds, and when it is absent the result is the input
+/// `otherwise`. The runtime knows which before the unit runs, because the
+/// presence of an input is known then. The two must be kept the same way,
+/// so the result has one layout whichever is chosen. They need not have the
+/// same sizes: the result has the sizes of the one chosen.
+///
+/// An input that the unit uses only as the `otherwise` of selections is
+/// needed only when one of them would choose it. While the Optional input is
+/// present the runtime need not hold it at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    /// What this result answers.
+    pub root: Root,
+    /// A reference into the unit's table of kinds.
+    pub kind: KindRef,
+    /// Which input is chosen: always, or when it is present.
+    pub first: u32,
+    /// Which input is chosen when `first` is absent.
+    pub otherwise: Option<u32>,
 }
 
 /// One entry point in the code. Stages run in order.
@@ -219,7 +245,10 @@ pub struct Unit {
     /// Every layout the ports use, each stated once.
     pub layouts: Layouts,
     pub inputs: Vec<Port>,
+    /// Results the unit computes.
     pub outputs: Vec<Port>,
+    /// Results that are inputs, unchanged.
+    pub selected: Vec<Selection>,
     pub storage: Vec<Storage>,
     /// The layout of the shape record: every size not fixed at compile time.
     pub shape_fields: Vec<ShapeField>,
@@ -250,6 +279,7 @@ pub enum Code {
 pub enum PortRef {
     Input(u32),
     Output(u32),
+    Selected(u32),
 }
 
 /// Why a unit description is not well formed.
@@ -295,6 +325,8 @@ pub enum Defect {
     KindMismatch(PortRef),
     /// An input port is not the value of a node.
     InputNotAValue(PortRef),
+    /// A selection names an input the unit does not have.
+    UnknownInput(PortRef),
     /// A storage capacity is stated as presence, which is not a size.
     CapacityNotASize(Slot),
     /// Two planes of one value are given the same storage.
@@ -323,7 +355,8 @@ pub enum Defect {
 /// checks. The tables of kinds and of layouts are well formed and state each
 /// entry once. Every slot and shape field named exists. Each port's kind has
 /// its storage described, its layout lays out that kind, and it gives one
-/// size or presence for each run-time fact and one slot for each plane. No
+/// size or presence for each run-time fact and one slot for each plane. A
+/// selection chooses among inputs of the right kinds that are kept one way. No
 /// two planes of a value share storage, and each plane's layout fits inside
 /// one element of its storage. No capacity is stated as presence. No stage
 /// writes an input or an alias, and an alias refers to an input. The
@@ -599,6 +632,41 @@ impl Unit {
             owed.extend(applies.filter_map(runtime));
         }
 
+        // A selection chooses among inputs of the right kinds, kept one way.
+        for (index, selection) in self.selected.iter().enumerate() {
+            let at = PortRef::Selected(index as u32);
+            let input = |index: u32| {
+                self.inputs
+                    .get(index as usize)
+                    .ok_or(Defect::UnknownInput(at))
+            };
+            let first = input(selection.first)?;
+            let fits = match selection.otherwise {
+                None => first.kind == selection.kind,
+                Some(otherwise) => {
+                    let otherwise = input(otherwise)?;
+                    let holds = match self.kinds.get(first.kind) {
+                        Some(Definition::Optional(holds)) => Some(*holds),
+                        _ => None,
+                    };
+                    let kept = match self.layouts.get(first.layout) {
+                        Some(Layout::Optional(kept)) => Some(*kept),
+                        _ => None,
+                    };
+                    // The other input is either what `first` may hold, or
+                    // itself an Optional of it; the result is of its kind.
+                    let whole = holds == Some(otherwise.kind) && kept == Some(otherwise.layout);
+                    let optional = holds.is_some()
+                        && first.kind == otherwise.kind
+                        && first.layout == otherwise.layout;
+                    otherwise.kind == selection.kind && (whole || optional)
+                }
+            };
+            if !fits {
+                return Err(Defect::KindMismatch(at));
+            }
+        }
+
         // A stage writes only storage it owns, whose capacity is known, and
         // only parts of results whose sizes and presence are known.
         let mut provided = vec![false; self.storage.len()];
@@ -644,7 +712,7 @@ impl Unit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kind::{AxisKind, Definition};
+    use crate::kind::AxisKind;
     use crate::layout::{Part, Scalar};
     use crate::program::{Node, StateId};
 
@@ -1086,5 +1154,70 @@ mod tests {
         };
         assert_eq!(domain(&[0, u64::MAX, 2]).count(), Some(0));
         assert_eq!(domain(&[u64::MAX, 2, 0]).count(), Some(0));
+    }
+
+    /// A unit that computes nothing: `current = state ?? initial`, with the
+    /// State an Optional Array and the initial value an Array stored as the
+    /// given scalar.
+    fn current(initial: Scalar, selection: impl Fn(KindRef, KindRef) -> Selection) -> Unit {
+        let mut tables = Tables::default();
+        let (array, array_layout) = tables.reals();
+        let optional = tables.kinds.define(Definition::Optional(array));
+        let optional_layout = tables.layouts.define(Layout::Optional(array_layout));
+        let (_, initial_layout) = tables.array(Definition::Real, initial);
+        let present = ShapeEntry::Runtime(ShapeRef(0));
+        let state = tables.port(optional, optional_layout, vec![present, at(1)], &[0]);
+        let fallback = tables.port(array, initial_layout, vec![at(2)], &[1]);
+        Unit {
+            inputs: vec![state, fallback],
+            selected: vec![selection(array, optional)],
+            storage: vec![
+                Storage::Input(need(8, vec![at(1)])),
+                Storage::Input(need(8, vec![at(2)])),
+            ],
+            shape_fields: vec![
+                ShapeField::Presence,
+                ShapeField::Domain { rank: 1 },
+                ShapeField::Domain { rank: 1 },
+            ],
+            ..tables.unit()
+        }
+    }
+
+    #[test]
+    fn a_result_may_be_an_optional_input_or_a_fallback_without_a_copy() {
+        let choose = |kind, first, otherwise| Selection {
+            root: STATE,
+            kind,
+            first,
+            otherwise,
+        };
+        let selected = PortRef::Selected(0);
+        let mismatch = Some(Defect::KindMismatch(selected));
+
+        // The State when present, the initial value otherwise. Nothing is
+        // computed, so the unit has no stages and no storage of its own.
+        let unit = current(Scalar::F64, |array, _| choose(array, 0, Some(1)));
+        assert!(unit.check().is_ok());
+
+        // The State as it stands, present or not.
+        let unit = current(Scalar::F64, |_, optional| choose(optional, 0, None));
+        assert!(unit.check().is_ok());
+
+        // The two must be kept the same way, so the result has one layout.
+        let unit = current(Scalar::F32, |array, _| choose(array, 0, Some(1)));
+        assert_eq!(unit.check().err(), mismatch);
+
+        // The first of two must be an Optional: the initial value never is.
+        let unit = current(Scalar::F64, |array, _| choose(array, 1, Some(0)));
+        assert_eq!(unit.check().err(), mismatch);
+
+        // The result is of the fallback's kind, not the Optional's.
+        let unit = current(Scalar::F64, |_, optional| choose(optional, 0, Some(1)));
+        assert_eq!(unit.check().err(), mismatch);
+
+        // A selection must name inputs the unit has.
+        let unit = current(Scalar::F64, |array, _| choose(array, 0, Some(7)));
+        assert_eq!(unit.check().err(), Some(Defect::UnknownInput(selected)));
     }
 }

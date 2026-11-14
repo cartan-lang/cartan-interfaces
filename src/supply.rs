@@ -28,7 +28,8 @@ pub struct Emitted {
 /// and passed in. This is the same kind of choice as fusing or separating the
 /// steps within a unit, made at the unit's edge. When a unit lists a derived
 /// value as an input, the runtime must hold that value first, selecting it if
-/// it does not. Because a derived value is identified by what it computes, a
+/// it does not. The one exception is an input a unit uses only as the
+/// fallback of a selection: it is needed only when it would be chosen. Because a derived value is identified by what it computes, a
 /// value one unit produces and another takes in is the same node in both,
 /// whether or not the source names it.
 ///
