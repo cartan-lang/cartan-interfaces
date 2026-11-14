@@ -869,6 +869,36 @@ impl Governed<'_> {
     }
 }
 
+impl ShapeField {
+    /// How many words a shape value of this sort takes in a [`Frame`].
+    pub fn words(self) -> u32 {
+        match self {
+            ShapeField::Presence | ShapeField::Length => 1,
+            ShapeField::Domain { rank } => 2 * rank as u32,
+        }
+    }
+}
+
+impl Stage {
+    /// The frame this stage is handed, given the unit's table of shape
+    /// fields. Every slot and shape value the stage names must exist, which
+    /// a checked unit guarantees.
+    pub fn frame(&self, shape_fields: &[ShapeField]) -> Frame {
+        let slots: Vec<Slot> = self.reads.iter().chain(&self.writes).copied().collect();
+        let mut words = slots.len() as u32;
+        let mut shapes = Vec::new();
+        for shape in self.uses.iter().chain(&self.determines) {
+            shapes.push((*shape, words));
+            words += shape_fields[shape.0 as usize].words();
+        }
+        Frame {
+            slots,
+            shapes,
+            words,
+        }
+    }
+}
+
 impl Unit {
     /// Check that the description is well formed and can be carried.
     pub fn check(self) -> Result<Checked, Refusal> {

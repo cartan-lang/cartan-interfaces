@@ -430,6 +430,7 @@ mod unit {
     fn stage(writes: &[u32], uses: &[u32], determines: &[u32]) -> Stage {
         let fields = |fields: &[u32]| fields.iter().map(|field| ShapeRef(*field)).collect();
         Stage {
+            entry: String::new(),
             reads: Vec::new(),
             writes: writes.iter().map(|slot| Slot(*slot)).collect(),
             uses: fields(uses),
@@ -1028,5 +1029,27 @@ mod unit {
             bounded.consumers(count),
             [Consumer::Stage(1), Consumer::Result(0)]
         );
+    }
+
+    #[test]
+    fn a_frame_lists_regions_then_the_shape_values_used_and_determined() {
+        // A stage that reads slot 3 and writes slot 1, uses a presence and a
+        // rank-2 domain, and determines a length.
+        let fields = [
+            ShapeField::Presence,
+            ShapeField::Domain { rank: 2 },
+            ShapeField::Length,
+        ];
+        let stage = Stage {
+            reads: vec![Slot(3)],
+            ..stage(&[1], &[0, 1], &[2])
+        };
+        let frame = stage.frame(&fields);
+        assert_eq!(frame.slots, [Slot(3), Slot(1)]);
+        // Two region words, one for presence, four for the domain, one for
+        // the length.
+        let shapes = [(ShapeRef(0), 2), (ShapeRef(1), 3), (ShapeRef(2), 7)];
+        assert_eq!(frame.shapes, shapes);
+        assert_eq!(frame.words, 8);
     }
 }

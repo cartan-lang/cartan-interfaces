@@ -471,6 +471,9 @@ pub enum Demand {
     /// field computed from Params gets that field from an ordinary binding,
     /// not from its initial value.
     Initial(StateId),
+    /// The value a Param has when a run is started without giving it one.
+    /// Defaults are closed in the same way.
+    Default(ParamId),
     /// The value one update block gives one of the States it writes, computed
     /// from the State as it stands.
     Next { update: UpdateId, state: StateId },
@@ -801,11 +804,15 @@ pub struct Selection {
 /// Gap: which of the shape values a stage uses set the extent it is
 /// dispatched over is not stated.
 ///
-/// Gap: the rest of the calling convention of a stage on each target is not
-/// written yet: what a base is, how the entry is named, and how shape values
-/// are passed.
+/// How a stage receives its slots and shape values is written for
+/// WebAssembly, on [`Code::Wasm`], as a [`Frame`].
+///
+/// Gap: the calling convention of a stage on the other targets is not written
+/// yet.
 #[derive(Clone, Debug, Default)]
 pub struct Stage {
+    /// The name of this stage's entry in the code.
+    pub entry: String,
     /// Storage this stage reads.
     pub reads: Vec<Slot>,
     /// Storage this stage writes.
@@ -872,12 +879,48 @@ pub enum Target {
     Cuda,
 }
 
+/// What a stage is handed when it is launched: its regions, then its shape
+/// values, as a row of words. [`Stage::frame`] gives the frame of a stage.
+///
+/// The words come in this order: one for each slot the stage reads, one for
+/// each slot it writes, the shape values it uses, and the shape values it
+/// determines. A slot's word locates its region. A presence takes one word,
+/// zero or one. A length takes one word. A domain takes two words for each
+/// axis, the origin and then the extent.
+///
+/// The runtime fills the words of the regions and of the shape values the
+/// stage uses before the launch. The stage fills the words of the shape
+/// values it determines. Where a slot or a shape value does not apply,
+/// because it lies within an Optional that is absent, its words are zero and
+/// the code must not read through them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    /// The slots, in frame order. Slot `i` is at word `i`.
+    pub slots: Vec<Slot>,
+    /// Each shape value with the word where it starts, in frame order.
+    pub shapes: Vec<(ShapeRef, u32)>,
+    /// How many words the frame has.
+    pub words: u32,
+}
+
 /// Target code as text or bytes. The runtime's side prepares and loads it.
 ///
 /// Gap: the bytecode format is the official code generator's own and has no
 /// public specification yet.
 pub enum Code {
     Bytecode(Vec<u32>),
+    /// A WebAssembly module in binary form.
+    ///
+    /// The module imports one linear memory, named `memory` in module `env`,
+    /// and nothing else, and it has no start function, so it cannot call
+    /// anything outside itself. Every slot of the unit is in
+    /// `Memory::Linear`, and the runtime owns and grows that memory.
+    ///
+    /// Each stage is an exported function with the stage's entry name. It
+    /// takes one 32-bit integer and returns nothing. The integer is the byte
+    /// offset in the memory of the stage's [`Frame`], whose words are 64 bits
+    /// wide and little-endian. A region's word is the byte offset of the
+    /// region in the memory.
     Wasm(Vec<u8>),
     Metal(String),
     Cuda(String),
@@ -1111,6 +1154,55 @@ pub trait Supplier {
 
     /// One unit that meets every demand, for one target.
     fn unit(&self, demands: &[Demand], target: Target) -> Result<Emitted, Self::Diagnostic>;
+
+    /// The inspection commands this supplier offers.
+    fn inspections(&self) -> Vec<Inspection> {
+        Vec::new()
+    }
+
+    /// Run one inspection command, or nothing if this supplier has no such
+    /// command.
+    fn inspect(
+        &self,
+        component: &str,
+        view: &str,
+        arguments: &[String],
+    ) -> Option<Result<Report, Self::Diagnostic>> {
+        let _ = (component, view, arguments);
+        None
+    }
+}
+
+/// One command a supplier offers for looking inside it during development.
+///
+/// A runtime's interactive session lists these beside its own and runs them
+/// by name, so the runtime never has to know what the supplier is built
+/// from. An inspection reads and never changes anything. Nothing but an
+/// interactive session calls one: they are not a way for components to use
+/// each other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inspection {
+    /// The component the command belongs to, such as `compiler` or `syntax`.
+    pub component: String,
+    /// What it shows, such as `unit` or `tree`.
+    pub view: String,
+    /// The arguments it takes, as a usage line. Empty if it takes none.
+    pub arguments: String,
+    /// One line saying what it shows.
+    pub summary: String,
+}
+
+/// What an inspection returns: structured data. Whoever prints it decides
+/// how; an inspection never formats text for display.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Report {
+    Text(String),
+    Int(i64),
+    Real(f64),
+    Bool(bool),
+    List(Vec<Report>),
+    /// Named entries in order.
+    Record(Vec<(String, Report)>),
 }
 
 // ===========================================================================
