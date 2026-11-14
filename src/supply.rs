@@ -1,42 +1,7 @@
 //! What a compiler front half supplies to the runtime.
 
-use crate::program::{Name, Program, UpdateId};
+use crate::program::{Program, Root};
 use crate::unit::{Checked, Code, Target};
-
-/// What the runtime asks a supplier to compile.
-///
-/// All three ask for the same kind of computation: read named values, produce
-/// named values. The request, not the unit, says what happens to the results.
-///
-/// Decide: these three name a use the runtime makes of the results as well
-/// as a choice of what to compute. The two could be separated: one way to
-/// select what is computed, with initializing, committing and observing left
-/// to the runtime. A State's name is its current value, so selecting by name
-/// alone cannot ask for its initial value or for an update's new value.
-///
-/// Gap: a unit that takes a binding as an input has it supplied by an
-/// `Observe` request, which is defined against a published State. A binding
-/// may be needed before anything is published, or for a State several
-/// unpublished updates on. Such a request must use the values its consumer
-/// captured.
-#[derive(Clone, Copy, Debug)]
-pub enum Request<'a> {
-    /// The initial value of every State. Initial values are closed: they read
-    /// no State and no Param. A State that starts absent and is later given a
-    /// field computed from Params gets that field from an ordinary binding,
-    /// not from its initial value. The results are the first State.
-    Launch,
-    /// One transition of one update block. Reads one State, Params and
-    /// upstream bindings, and produces the next value of each State the block
-    /// writes. Its results together are the next State. A run may make many
-    /// transitions between publications; see `session`.
-    Update(UpdateId),
-    /// The values of the named declarations for one published State. Reads
-    /// the same things an update may. A name may be a binding, a Param or a
-    /// State; asking for a State's value reads it. The State does not change.
-    /// The names need not have been selected at launch.
-    Observe(&'a [Name]),
-}
 
 /// A checked unit description and the target code it describes.
 pub struct Emitted {
@@ -50,23 +15,38 @@ pub struct Emitted {
 /// graph and no knowledge of how the code was generated. Two suppliers that
 /// honor this contract are interchangeable to the runtime.
 ///
-/// An input port may name a binding. The supplier chooses, binding by
-/// binding, between computing it inside the unit and having it computed once
-/// and passed in. This is the same kind of choice as fusing or separating
-/// the steps within a unit, made at the unit's edge. When a unit lists a binding as an input, the runtime
-/// must hold that binding's value first, requesting it with `Observe` if it
-/// does not.
+/// The runtime selects what is to be computed and the supplier compiles it.
+/// Every selection is the same kind of computation: read values, produce
+/// values. What the runtime then does with the results is its own business
+/// and no part of the selection. It makes the first State from every State's
+/// initial value. It commits an update by taking the new values of all the
+/// States the block writes together. It reports an observation from the
+/// values of the declarations it was asked for.
+///
+/// An input port may be a binding. The supplier chooses, binding by binding,
+/// between computing it inside the unit and having it computed once and
+/// passed in. This is the same kind of choice as fusing or separating the
+/// steps within a unit, made at the unit's edge. When a unit lists a binding
+/// as an input, the runtime must hold that binding's value first, selecting
+/// it if it does not.
+///
+/// Gap: a binding computed to feed another unit must be computed from the
+/// same values that unit will read. Those need not be a published State: the
+/// binding may be needed before anything is published, or for a State
+/// several unpublished updates on. How a selection states which values it is
+/// computed from is not written yet.
 ///
 /// Decide: how the runtime knows a held binding is still good for the State it
 /// is about to read. The simplest rule is that a binding's value stays valid
 /// while every value it was computed from is unchanged.
 ///
 /// Decide: whether a supplier may be asked for a unit while earlier units from
-/// it are running. The runtime needs this for a request made after launch.
+/// it are running. The runtime needs this for a selection made after launch.
 pub trait Supplier {
     type Diagnostic;
 
     fn program(&self) -> &Program;
 
-    fn unit(&self, request: Request<'_>, target: Target) -> Result<Emitted, Self::Diagnostic>;
+    /// One unit that computes every root selected, for one target.
+    fn unit(&self, roots: &[Root], target: Target) -> Result<Emitted, Self::Diagnostic>;
 }

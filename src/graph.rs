@@ -1,7 +1,6 @@
 //! Source meaning: names, types, dependencies and the normalized computation.
 
-use crate::program::Program;
-use crate::supply::Request;
+use crate::program::{Program, Root};
 use crate::syntax::SyntaxTree;
 
 /// A resolved, typed program. Documents and libraries are supplied by the
@@ -157,6 +156,6 @@ pub trait Analyze {
     fn plans(
         &self,
         analysis: &Analysis,
-        request: Request<'_>,
+        roots: &[Root],
     ) -> Result<Self::Navigator, Self::Diagnostic>;
 }

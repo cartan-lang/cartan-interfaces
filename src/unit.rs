@@ -1,7 +1,7 @@
 //! The description of one piece of compiled code.
 
 use crate::kind::{KindDefect, KindRef, Kinds, Primitive, ShapeField};
-use crate::program::Name;
+use crate::program::Root;
 
 /// One axis of an Array domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,7 +191,9 @@ pub enum Storage {
 /// something the runtime does silently while binding.
 #[derive(Clone, Debug)]
 pub struct Port {
-    pub name: Name,
+    /// What this port carries. An input is always the value of a
+    /// declaration; a result answers one root the unit was asked for.
+    pub root: Root,
     /// A reference into the unit's table of kinds.
     pub kind: KindRef,
     /// One entry per shape field of the kind, in the kind's order.
@@ -260,7 +262,7 @@ pub struct Stage {
 /// they list. A unit asked for by an update and a unit asked for by an
 /// observation are also the same kind of unit: a computation that reads named
 /// values and produces named values. Whether its results become the next State
-/// is decided by the request, not by anything in the unit. Producing the value
+/// is decided by the runtime, not by anything in the unit. Producing the value
 /// of a State is not the same as writing it.
 #[derive(Clone, Debug, Default)]
 pub struct Unit {
@@ -293,6 +295,13 @@ pub enum Code {
     Cuda(String),
 }
 
+/// One port of a unit, by its place among the inputs or the results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortRef {
+    Input(u32),
+    Output(u32),
+}
+
 /// Why a unit description is not well formed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Defect {
@@ -322,26 +331,31 @@ pub enum Defect {
     /// A port's sizes or leaves do not match its kind: the wrong number of
     /// either, a size of the wrong sort, or a scalar that cannot store its
     /// primitive.
-    KindMismatch(Name),
+    KindMismatch(PortRef),
     /// The unit's table of kinds is not well formed.
     Kind(KindDefect),
     /// A port refers to a kind that is not in the unit's table.
-    UnknownKind(Name),
+    UnknownKind(PortRef),
     /// A storage capacity is stated as presence, which is not a size.
     CapacityNotASize(Slot),
     /// A port's kind includes a fiber whose storage this contract does not
     /// describe yet. The kind is valid; a unit cannot carry it across.
-    KindUnsupported(Name),
+    KindUnsupported(PortRef),
     /// A leaf names a plane its port does not have.
     UnknownPlane {
+        port: PortRef,
         leaf: u32,
     },
+    /// An input port is not the value of a declaration.
+    InputNotAValue(PortRef),
     /// A leaf does not fit inside one element of its plane.
     LeafOutsideElement {
+        port: PortRef,
         leaf: u32,
     },
     /// Two leaves of one value occupy the same bytes.
     LeavesOverlap {
+        port: PortRef,
         first: u32,
         second: u32,
     },
@@ -355,8 +369,8 @@ pub enum Defect {
 /// to it, and a Struct with two Arrays cannot fill one, compute the other's
 /// domain from it, then fill the other.
 ///
-/// Gap: a defect names a leaf by its number but not its port, and several
-/// distinct mismatches share one defect.
+/// Gap: several distinct mismatches between a port and its kind share one
+/// defect.
 ///
 /// The field is private, so holding one is proof the description passed these
 /// checks: the table of kinds is well formed and states each kind once;
@@ -425,13 +439,23 @@ impl Unit {
         self.kinds.check().map_err(Defect::Kind)?;
         let counts = self.kinds.leaf_counts();
         let shape_counts = self.kinds.shape_field_counts();
-        for port in self.inputs.iter().chain(&self.outputs) {
-            let mismatch = Defect::KindMismatch(port.name);
+        let ports = || {
+            let inputs = self.inputs.iter().enumerate();
+            let outputs = self.outputs.iter().enumerate();
+            inputs
+                .map(|(index, port)| (PortRef::Input(index as u32), port))
+                .chain(outputs.map(|(index, port)| (PortRef::Output(index as u32), port)))
+        };
+        for (at, port) in ports() {
+            if matches!(at, PortRef::Input(_)) && !matches!(port.root, Root::Value(_)) {
+                return Err(Defect::InputNotAValue(at));
+            }
+            let mismatch = Defect::KindMismatch(at);
             let Some(count) = counts.get(port.kind.0 as usize) else {
-                return Err(Defect::UnknownKind(port.name));
+                return Err(Defect::UnknownKind(at));
             };
             let Some(count) = *count else {
-                return Err(Defect::KindUnsupported(port.name));
+                return Err(Defect::KindUnsupported(at));
             };
             let facts = shape_counts[port.kind.0 as usize];
             if facts != Some(port.shape.len() as u64) || count != port.leaves.len() as u64 {
@@ -439,7 +463,7 @@ impl Unit {
             }
             let shape_fields = self.kinds.shape_fields(port.kind);
             let Some(primitives) = self.kinds.leaves(port.kind) else {
-                return Err(Defect::KindUnsupported(port.name));
+                return Err(Defect::KindUnsupported(at));
             };
             for (field, entry) in shape_fields.iter().zip(&port.shape) {
                 let fits = match entry {
@@ -461,14 +485,17 @@ impl Unit {
         // other. Leaves are compared by the storage they sit in, not by the
         // port's own numbering of its planes, so two planes naming one slot
         // or one input are seen as the same storage.
-        for port in self.inputs.iter().chain(&self.outputs) {
+        for (at, port) in ports() {
             let mut placed: Vec<(Slot, u32, u32)> = Vec::new();
             for (index, leaf) in port.leaves.iter().enumerate() {
                 let index = index as u32;
                 let slot = port
                     .planes
                     .get(leaf.plane as usize)
-                    .ok_or(Defect::UnknownPlane { leaf: index })?;
+                    .ok_or(Defect::UnknownPlane {
+                        port: at,
+                        leaf: index,
+                    })?;
                 let (backing, element) = match storage(*slot)? {
                     Storage::Alias(of) => (*of, storage(*of)?),
                     other => (*slot, other),
@@ -480,13 +507,19 @@ impl Unit {
                 };
                 let end = match leaf.offset.checked_add(leaf.scalar.bytes()) {
                     Some(end) if end <= need.element_bytes => end,
-                    _ => return Err(Defect::LeafOutsideElement { leaf: index }),
+                    _ => {
+                        return Err(Defect::LeafOutsideElement {
+                            port: at,
+                            leaf: index,
+                        })
+                    }
                 };
                 let clash = placed.iter().position(|(other, start, stop)| {
                     *other == backing && leaf.offset < *stop && *start < end
                 });
                 if let Some(first) = clash {
                     return Err(Defect::LeavesOverlap {
+                        port: at,
                         first: first as u32,
                         second: index,
                     });
@@ -570,9 +603,10 @@ impl Unit {
 mod tests {
     use super::*;
     use crate::kind::{AxisKind, Definition};
-    use crate::program::StateId;
+    use crate::program::{Name, StateId};
 
-    const STATE: Name = Name::State(StateId(0));
+    const STATE: Root = Root::Value(Name::State(StateId(0)));
+    const RESULT: PortRef = PortRef::Output(0);
 
     fn need(element_bytes: u32, capacity: Vec<ShapeEntry>) -> Need {
         Need {
@@ -605,7 +639,7 @@ mod tests {
         let mut kinds = Kinds::default();
         let kind = array(&mut kinds, Definition::Real);
         let port = Port {
-            name: STATE,
+            root: STATE,
             kind,
             shape: vec![domain],
             leaves: vec![leaf(Scalar::F64, 0, 0)],
@@ -643,6 +677,21 @@ mod tests {
             stage: 0,
             slot: Slot(0),
         };
+        assert_eq!(unit.check().err(), Some(defect));
+    }
+
+    #[test]
+    fn an_input_is_the_value_of_a_declaration() {
+        // A unit may be asked for a State's initial value, but cannot take one in.
+        let (kinds, mut port) = field(cells(4), 0);
+        port.root = Root::Initial(StateId(0));
+        let unit = Unit {
+            kinds,
+            inputs: vec![port],
+            storage: vec![Storage::Input(need(8, vec![cells(4)]))],
+            ..Unit::default()
+        };
+        let defect = Defect::InputNotAValue(PortRef::Input(0));
         assert_eq!(unit.check().err(), Some(defect));
     }
 
@@ -686,7 +735,7 @@ mod tests {
         Unit {
             kinds,
             outputs: vec![Port {
-                name: STATE,
+                root: STATE,
                 kind,
                 shape: vec![cells(4)],
                 leaves,
@@ -732,6 +781,7 @@ mod tests {
         // The Int placed on top of the Real.
         let clash = vec![leaf(Scalar::F64, 0, 0), leaf(Scalar::I32, 0, 4)];
         let overlap = Defect::LeavesOverlap {
+            port: RESULT,
             first: 0,
             second: 1,
         };
@@ -739,14 +789,17 @@ mod tests {
 
         // A Real in a 4-byte element.
         let wide = vec![leaf(Scalar::F64, 0, 0), leaf(Scalar::I32, 1, 0)];
-        let outside = Defect::LeafOutsideElement { leaf: 0 };
+        let outside = Defect::LeafOutsideElement {
+            port: RESULT,
+            leaf: 0,
+        };
         assert_eq!(
             unit(wide, vec![out(4), out(4)]).check().err(),
             Some(outside)
         );
 
         // A Real stored as an integer, and a leaf missing altogether.
-        let mismatch = Some(Defect::KindMismatch(STATE));
+        let mismatch = Some(Defect::KindMismatch(RESULT));
         let wrong = vec![leaf(Scalar::I64, 0, 0), leaf(Scalar::I32, 0, 8)];
         assert_eq!(unit(wrong, vec![out(16)]).check().err(), mismatch);
         let short = vec![leaf(Scalar::F64, 0, 0)];
@@ -757,7 +810,7 @@ mod tests {
     fn a_bool_is_stored_as_a_32_bit_integer() {
         let stored = |scalar| result_of(Definition::Bool, vec![leaf(scalar, 0, 0)], vec![out(8)]);
         assert!(stored(Scalar::I32).check().is_ok());
-        let mismatch = Some(Defect::KindMismatch(STATE));
+        let mismatch = Some(Defect::KindMismatch(RESULT));
         assert_eq!(stored(Scalar::I64).check().err(), mismatch);
         assert_eq!(stored(Scalar::F32).check().err(), mismatch);
     }
@@ -775,7 +828,7 @@ mod tests {
             Unit {
                 kinds,
                 outputs: vec![Port {
-                    name: STATE,
+                    root: STATE,
                     kind,
                     shape: vec![
                         ShapeEntry::Runtime(ShapeRef(0)),
@@ -811,7 +864,7 @@ mod tests {
             columns: 3,
         };
         let unit = result_of(matrix, Vec::new(), vec![out(72)]);
-        assert_eq!(unit.check().err(), Some(Defect::KindUnsupported(STATE)));
+        assert_eq!(unit.check().err(), Some(Defect::KindUnsupported(RESULT)));
     }
 }
 
@@ -819,9 +872,10 @@ mod tests {
 mod review {
     use super::*;
     use crate::kind::{Definition, Kinds};
-    use crate::program::StateId;
+    use crate::program::{Name, StateId};
 
-    const STATE: Name = Name::State(StateId(0));
+    const STATE: Root = Root::Value(Name::State(StateId(0)));
+    const RESULT: PortRef = PortRef::Output(0);
 
     #[test]
     fn an_empty_domain_counts_zero_whatever_the_axis_order() {
@@ -860,7 +914,7 @@ mod review {
         let unit = Unit {
             kinds,
             outputs: vec![Port {
-                name: STATE,
+                root: STATE,
                 kind,
                 shape: Vec::new(),
                 leaves: vec![leaf(0), leaf(1)],
@@ -875,6 +929,7 @@ mod review {
             ..Unit::default()
         };
         let overlap = Defect::LeavesOverlap {
+            port: RESULT,
             first: 0,
             second: 1,
         };
@@ -891,7 +946,7 @@ mod review {
         let unit = Unit {
             kinds,
             outputs: vec![Port {
-                name: STATE,
+                root: STATE,
                 kind,
                 shape: Vec::new(),
                 leaves: Vec::new(),
@@ -900,7 +955,7 @@ mod review {
             ..Unit::default()
         };
         // 2^40 scalars and no leaves listed: refused at once, not after a walk.
-        assert_eq!(unit.check().err(), Some(Defect::KindMismatch(STATE)));
+        assert_eq!(unit.check().err(), Some(Defect::KindMismatch(RESULT)));
     }
 
     #[test]
@@ -918,7 +973,7 @@ mod review {
             extent: 4,
         }]));
         let port = |shape| Port {
-            name: STATE,
+            root: STATE,
             kind,
             shape: vec![shape],
             leaves: vec![Leaf {
