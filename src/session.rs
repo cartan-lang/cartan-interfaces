@@ -10,7 +10,7 @@
 //! rendering may not. Where the repetition of updates executes is not
 //! specified.
 
-use crate::program::Name;
+use crate::program::Node;
 use crate::unit::Memory;
 
 /// One State of a running program. Each completed update makes the next,
@@ -30,7 +30,7 @@ pub enum Stop {
     Shortage,
     Cancelled,
     /// An input was missing or did not match the unit's declared port.
-    Binding(Name),
+    Binding(Node),
     /// The unit names a memory this runtime has not set up.
     Unplaced(Memory),
     /// The code did not do what its own description says, such as leaving a
@@ -60,5 +60,5 @@ pub trait Session {
 
     fn advance(&mut self, updates: u64) -> Result<Version, Stop>;
 
-    fn observe(&mut self, names: &[Name]) -> Result<Vec<(Name, Self::Value)>, Stop>;
+    fn observe(&mut self, nodes: &[Node]) -> Result<Vec<(Node, Self::Value)>, Stop>;
 }

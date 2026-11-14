@@ -191,8 +191,8 @@ pub enum Storage {
 /// something the runtime does silently while binding.
 #[derive(Clone, Debug)]
 pub struct Port {
-    /// What this port carries. An input is always the value of a
-    /// declaration; a result answers one root the unit was asked for.
+    /// What this port carries. An input is always the value of a node; a
+    /// result answers one root the unit was asked for.
     pub root: Root,
     /// A reference into the unit's table of kinds.
     pub kind: KindRef,
@@ -348,7 +348,7 @@ pub enum Defect {
         port: PortRef,
         leaf: u32,
     },
-    /// An input port is not the value of a declaration.
+    /// An input port is not the value of a node.
     InputNotAValue(PortRef),
     /// A leaf does not fit inside one element of its plane.
     LeafOutsideElement {
@@ -605,9 +605,9 @@ impl Unit {
 mod tests {
     use super::*;
     use crate::kind::{AxisKind, Definition};
-    use crate::program::{Name, StateId};
+    use crate::program::{Node, StateId};
 
-    const STATE: Root = Root::Value(Name::State(StateId(0)));
+    const STATE: Root = Root::Value(Node::State(StateId(0)));
     const RESULT: PortRef = PortRef::Output(0);
 
     fn need(element_bytes: u32, capacity: Vec<ShapeEntry>) -> Need {
@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn an_input_is_the_value_of_a_declaration() {
+    fn an_input_is_the_value_of_a_node() {
         // A unit may be asked for a State's initial value, but cannot take one in.
         let (kinds, mut port) = field(cells(4), 0);
         port.root = Root::Initial(StateId(0));
@@ -874,9 +874,9 @@ mod tests {
 mod review {
     use super::*;
     use crate::kind::{Definition, Kinds};
-    use crate::program::{Name, StateId};
+    use crate::program::{Node, StateId};
 
-    const STATE: Root = Root::Value(Name::State(StateId(0)));
+    const STATE: Root = Root::Value(Node::State(StateId(0)));
     const RESULT: PortRef = PortRef::Output(0);
 
     #[test]

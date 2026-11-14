@@ -1,6 +1,6 @@
 //! Source meaning: names, types, dependencies and the normalized computation.
 
-use crate::program::{Program, Root};
+use crate::program::{DerivedId, Program, Root};
 use crate::syntax::SyntaxTree;
 
 /// A resolved, typed program. Documents and libraries are supplied by the
@@ -39,10 +39,11 @@ pub enum Backing {
 /// storage. It does not offer every temporary, and it does not leave one out
 /// only because the source gave it no name.
 ///
-/// Gap: how Graph finds candidates, and what identifies one beyond its place
-/// in this list, is not written yet.
+/// Gap: how Graph finds candidates is not written yet.
 #[derive(Clone, Debug)]
 pub struct Candidate {
+    /// Which derived value it is.
+    pub value: DerivedId,
     /// What to call it when showing a plan to a person.
     pub label: String,
     /// The one backing it can have, when there is no choice. A result is

@@ -1,4 +1,4 @@
-//! What a program lets you name.
+//! The nodes of a program's dependency graph, and what a source calls them.
 
 use crate::kind::{KindRef, Kinds};
 
@@ -8,33 +8,49 @@ pub struct StateId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParamId(pub u32);
 
+/// The identity of one derived value. Identical computations have the same
+/// identity, whatever the source calls them and whether or not it names them
+/// at all.
+///
+/// Gap: what makes two computations identical is decided where the source is
+/// analyzed and is not written here. An identity holds within one analyzed
+/// program; whether it survives a change to the source is not settled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BindingId(pub u32);
+pub struct DerivedId(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UpdateId(pub u32);
 
-/// What the source calls a declaration.
+/// One node of a program's dependency graph: something that has a value at
+/// each version.
 ///
-/// A name identifies a declaration everywhere: in a unit's ports, in the
-/// runtime's committed State and in a request. Port order and type numbering
-/// are never identity. A name does not identify one value: the same State has
-/// a different value at each version and in each run.
+/// A State and a Param are identified by name. Two with the same
+/// declaration are still different, because each has its own history. A
+/// derived value is identified by what it computes. Two bindings that
+/// compute the same thing are one node with one value, and a value the
+/// source never names is a node like any other.
+///
+/// A node is the same everywhere it appears: in a unit's ports, in what the
+/// runtime holds and in what is selected. Port order and type numbering are
+/// never identity. A node does not identify one value: it has a value at
+/// each version and in each run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Name {
+pub enum Node {
     /// Written by update blocks; belongs to the run.
     State(StateId),
     /// Set from outside the run; never written by an update.
     Param(ParamId),
-    /// Derived from States, Params and other bindings. Read-only. A unit may
-    /// take one as an input once its value has been computed.
-    Binding(BindingId),
+    /// A pure function of States, Params and other derived values. Never
+    /// written. A unit may take one as an input once its value has been
+    /// computed.
+    Derived(DerivedId),
 }
 
-/// One nameable value: its identity, its spelling in the source and its type.
+/// One name the source gives a node: the node, its spelling and its kind.
+/// Several names may be given to one derived value.
 #[derive(Clone, Debug)]
 pub struct Declared {
-    pub name: Name,
+    pub node: Node,
     pub label: String,
     /// A reference into the program's table of kinds.
     pub kind: KindRef,
@@ -42,18 +58,15 @@ pub struct Declared {
 
 /// One thing a supplier can be asked to compute.
 ///
-/// A State's name means the value it has now. Its initial value, and the
-/// value an update gives it, are different computations, so each has its own
-/// way to be selected. What is selected says nothing about what is done with
-/// the result.
-///
-/// Gap: a value that the source does not name, such as an intermediate one
-/// unit computes for another to take as an input, cannot be selected yet.
+/// A State stands for the value it has now. Its initial value, and the value
+/// an update gives it, are different computations, so each has its own way
+/// to be selected. What is selected says nothing about what is done with the
+/// result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Root {
-    /// The value a declaration has: a binding's value, a Param, or a State as
-    /// it stands.
-    Value(Name),
+    /// The value a node has: a derived value, a Param, or a State as it
+    /// stands.
+    Value(Node),
     /// The value a State starts with. Initial values are closed: they read no
     /// State and no Param. A State that starts absent and is later given a
     /// field computed from Params gets that field from an ordinary binding,
@@ -77,7 +90,7 @@ pub struct Update {
 /// the labels only to resolve what a user asks for.
 #[derive(Clone, Debug, Default)]
 pub struct Program {
-    /// Every kind the declarations use, each stated once.
+    /// Every kind the declared nodes use, each stated once.
     pub kinds: Kinds,
     pub declared: Vec<Declared>,
     /// Update blocks, in the order the source writes them. That is not the
