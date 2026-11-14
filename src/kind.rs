@@ -79,7 +79,9 @@ pub enum ShapeField {
 /// A reference to one kind: its place in a table of kinds.
 ///
 /// Within one checked table, two references name the same kind exactly when
-/// they are equal.
+/// they are equal, as far as this module represents kinds. It does not yet
+/// represent a product's algebra, so that guarantee does not reach products
+/// that differ only in algebra.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KindRef(pub u32);
 
@@ -388,28 +390,63 @@ impl Kinds {
         Some(())
     }
 
+    /// How many run-time facts a value of each kind has, one answer per
+    /// definition, worked out once for the whole table. The answer is nothing
+    /// if the count does not fit in 64 bits.
+    pub fn shape_field_counts(&self) -> Vec<Option<u64>> {
+        let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.definitions.len());
+        for definition in &self.definitions {
+            let members = |counts: &Vec<Option<u64>>| {
+                Self::children(definition)
+                    .iter()
+                    .try_fold(0u64, |sum, kind| sum.checked_add(counts[kind.0 as usize]?))
+            };
+            let count = match definition {
+                Definition::Array { .. } => Some(1),
+                Definition::Optional(_) => members(&counts).and_then(|inner| inner.checked_add(1)),
+                Definition::Struct(_) | Definition::Tuple(_) => members(&counts),
+                _ => Some(0),
+            };
+            counts.push(count);
+        }
+        counts
+    }
+
     /// The run-time facts of a value of a kind, in order: presence first for
     /// an Optional, a domain for an Array, and the facts of each member of a
     /// Struct or Tuple in turn. A port lists one entry for each, in this
     /// order.
+    ///
+    /// This writes the facts of a repeated kind out in full. Ask
+    /// `shape_field_counts` first. Parts of a kind that have no facts are
+    /// not visited.
     pub fn shape_fields(&self, kind: KindRef) -> Vec<ShapeField> {
+        let counts = self.shape_field_counts();
         let mut fields = Vec::new();
-        self.push_shape_fields(kind, &mut fields);
+        self.push_shape_fields(kind, &counts, &mut fields);
         fields
     }
 
-    fn push_shape_fields(&self, kind: KindRef, fields: &mut Vec<ShapeField>) {
+    fn push_shape_fields(
+        &self,
+        kind: KindRef,
+        counts: &[Option<u64>],
+        fields: &mut Vec<ShapeField>,
+    ) {
+        if counts.get(kind.0 as usize) == Some(&Some(0)) {
+            return;
+        }
         match self.get(kind) {
             Some(Definition::Array { axes, .. }) => {
                 fields.push(ShapeField::Domain { rank: axes.len() })
             }
             Some(Definition::Optional(inner)) => {
                 fields.push(ShapeField::Presence);
-                self.push_shape_fields(*inner, fields);
+                self.push_shape_fields(*inner, counts, fields);
             }
             Some(definition @ (Definition::Struct(_) | Definition::Tuple(_))) => {
                 for member in Self::children(definition) {
-                    self.push_shape_fields(member, fields);
+                    self.push_shape_fields(member, counts, fields);
                 }
             }
             _ => {}

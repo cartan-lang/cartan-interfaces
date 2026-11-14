@@ -46,9 +46,14 @@ pub enum Stop {
 /// A session coordinates a supplier and the runtime. It is not another
 /// evaluator, and nothing outside the runtime writes State.
 ///
-/// Gap: this is a placeholder. Launching, parameters, how publication is
-/// requested or offered, delivery of results and stopping conditions are not
-/// written yet. `advance` states a number of updates, not how they are run.
+/// Gap: this is a placeholder and its methods are provisional. Launching,
+/// parameters, how publication is requested or offered, delivery of results
+/// and stopping conditions are not written yet. `advance` states a number of
+/// updates, not how they are run or which update block runs when there are
+/// several. `observe` does not say which State and Params its values belong
+/// to. Both report with `Stop`, which is why a run ended; a request that is
+/// refused, or that cannot be compiled, need not end the run and has no
+/// result type of its own yet.
 pub trait Session {
     /// A computed value. Reading its bytes back is a separate, explicit step.
     type Value;

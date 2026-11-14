@@ -7,6 +7,12 @@ use crate::unit::{Checked, Unit};
 ///
 /// It is immutable and reusable: the same prepared code can be loaded for
 /// several devices of one architecture and run any number of times.
+///
+/// Gap: preparation accepts any supplier's output, yet it sits in the
+/// pipeline layer, so a runtime built without that layer has no preparation
+/// contract. And `prepare` works inside a live backend context while its
+/// result is meant to be reusable across devices; whether the result is
+/// tied to that context is not said.
 pub struct Prepared<C> {
     unit: Checked,
     code: C,

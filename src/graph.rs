@@ -123,9 +123,11 @@ pub struct Computation {
 ///
 /// Decide: who chooses, and whether the choice may depend on what the runtime
 /// already holds. Either way a prepared unit's inputs never change; a
-/// different plan is a different unit. A binding that depends on no State an
-/// update writes is a candidate for an input, since it is the same on every
-/// step, but not an obligation: a cheap one can stay inline.
+/// different plan is a different unit. A binding whose value does not change
+/// while everything it was computed from is unchanged is a candidate for an
+/// input, but not an obligation: a cheap one can stay inline. Depending on no
+/// State that one update writes is not enough to make it constant, since a
+/// Param or another update can change what it reads.
 pub trait Navigate {
     type Diagnostic;
 

@@ -26,6 +26,7 @@ impl ShapeValue {
         match self {
             ShapeValue::Presence(_) => None,
             ShapeValue::Length(length) => Some(*length),
+            ShapeValue::Domain(axes) if axes.iter().any(|axis| axis.extent == 0) => Some(0),
             ShapeValue::Domain(axes) => axes
                 .iter()
                 .try_fold(1u64, |count, axis| count.checked_mul(axis.extent)),
@@ -89,6 +90,11 @@ pub enum Memory {
 }
 
 /// A machine scalar: how one leaf of a value is stored.
+///
+/// Gap: a scalar here says how a leaf is stored. It does not say at what
+/// width arithmetic on it is done. Int arithmetic wraps at the Int's width
+/// and Real arithmetic depends on precision, so that is not a layout choice
+/// and nothing here grants the freedom to change it.
 ///
 /// An Int is stored as `I32` or `I64` and a Real as `F32` or `F64`. A Bool
 /// is stored as `I32` holding 0 for false or 1 for true; no other value is a
@@ -343,6 +349,15 @@ pub enum Defect {
 
 /// A unit description that passed [`Unit::check`].
 ///
+/// Gap: the check ties a result's sizes and presence to the whole port. It
+/// should tie them to the part of the value a stage is writing. As it
+/// stands, a result fixed as absent is refused for sizes that do not apply
+/// to it, and a Struct with two Arrays cannot fill one, compute the other's
+/// domain from it, then fill the other.
+///
+/// Gap: a defect names a leaf by its number but not its port, and several
+/// distinct mismatches share one defect.
+///
 /// The field is private, so holding one is proof the description passed these
 /// checks: the table of kinds is well formed and states each kind once;
 /// every slot and shape field named exists; each port's kind has its storage
@@ -350,8 +365,11 @@ pub enum Defect {
 /// presence and leaves match it; no capacity is stated as presence; no stage writes an input
 /// or an alias; an alias refers to an input; the capacity of storage, and the
 /// sizes and presence of a result, are known before the stage that writes it; every leaf fits inside one element of its plane and
-/// overlaps no other. It does not check that every result is written by some
-/// stage, and it cannot show that the code honors the description.
+/// overlaps no other. Passing these checks does not make a unit ready to
+/// run. They do not show that every result is written by some stage, that
+/// storage is read only after something wrote it, that a fixed domain fits
+/// the capacity stated for it, or that an alignment is usable, and they
+/// cannot show that the code honors the description.
 ///
 /// Decide: how far the runtime trusts code from a supplier it did not build.
 /// Nothing in this contract confines code to the storage it declared.
@@ -406,6 +424,7 @@ impl Unit {
         // leaves are the ones its kind calls for.
         self.kinds.check().map_err(Defect::Kind)?;
         let counts = self.kinds.leaf_counts();
+        let shape_counts = self.kinds.shape_field_counts();
         for port in self.inputs.iter().chain(&self.outputs) {
             let mismatch = Defect::KindMismatch(port.name);
             let Some(count) = counts.get(port.kind.0 as usize) else {
@@ -414,10 +433,11 @@ impl Unit {
             let Some(count) = *count else {
                 return Err(Defect::KindUnsupported(port.name));
             };
-            let shape_fields = self.kinds.shape_fields(port.kind);
-            if shape_fields.len() != port.shape.len() || count != port.leaves.len() as u64 {
+            let facts = shape_counts[port.kind.0 as usize];
+            if facts != Some(port.shape.len() as u64) || count != port.leaves.len() as u64 {
                 return Err(mismatch);
             }
+            let shape_fields = self.kinds.shape_fields(port.kind);
             let Some(primitives) = self.kinds.leaves(port.kind) else {
                 return Err(Defect::KindUnsupported(port.name));
             };
@@ -437,18 +457,21 @@ impl Unit {
             }
         }
 
-        // Every leaf sits inside one element of a plane, overlapping no other.
+        // Every leaf sits inside one element of its storage, overlapping no
+        // other. Leaves are compared by the storage they sit in, not by the
+        // port's own numbering of its planes, so two planes naming one slot
+        // or one input are seen as the same storage.
         for port in self.inputs.iter().chain(&self.outputs) {
-            let mut placed: Vec<(u32, u32, u32)> = Vec::new();
+            let mut placed: Vec<(Slot, u32, u32)> = Vec::new();
             for (index, leaf) in port.leaves.iter().enumerate() {
                 let index = index as u32;
                 let slot = port
                     .planes
                     .get(leaf.plane as usize)
                     .ok_or(Defect::UnknownPlane { leaf: index })?;
-                let element = match storage(*slot)? {
-                    Storage::Alias(of) => storage(*of)?,
-                    other => other,
+                let (backing, element) = match storage(*slot)? {
+                    Storage::Alias(of) => (*of, storage(*of)?),
+                    other => (*slot, other),
                 };
                 let (Storage::Input(need) | Storage::Output(need) | Storage::Scratch(need)) =
                     element
@@ -459,16 +482,16 @@ impl Unit {
                     Some(end) if end <= need.element_bytes => end,
                     _ => return Err(Defect::LeafOutsideElement { leaf: index }),
                 };
-                for (other, start, stop) in &placed {
-                    if *other == leaf.plane && leaf.offset < *stop && *start < end {
-                        let first = placed.iter().position(|p| p == &(*other, *start, *stop));
-                        return Err(Defect::LeavesOverlap {
-                            first: first.unwrap_or(0) as u32,
-                            second: index,
-                        });
-                    }
+                let clash = placed.iter().position(|(other, start, stop)| {
+                    *other == backing && leaf.offset < *stop && *start < end
+                });
+                if let Some(first) = clash {
+                    return Err(Defect::LeavesOverlap {
+                        first: first as u32,
+                        second: index,
+                    });
                 }
-                placed.push((leaf.plane, leaf.offset, end));
+                placed.push((backing, leaf.offset, end));
             }
         }
 
@@ -488,7 +511,12 @@ impl Unit {
             }
         }
         let mut provided = vec![false; self.storage.len()];
-        let result_of = |slot: Slot| self.outputs.iter().find(|port| port.planes.contains(&slot));
+        let results_in = |slot: Slot| {
+            self.outputs
+                .iter()
+                .filter(move |port| port.planes.contains(&slot))
+                .flat_map(|port| port.shape.iter())
+        };
         for (index, stage) in self.stages.iter().enumerate() {
             for slot in &stage.reads {
                 storage(*slot)?;
@@ -501,8 +529,7 @@ impl Unit {
                     });
                 };
                 if !std::mem::replace(&mut provided[slot.0 as usize], true) {
-                    let of_result = result_of(*slot).map(|port| port.shape.iter());
-                    for entry in need.capacity.iter().chain(of_result.into_iter().flatten()) {
+                    for entry in need.capacity.iter().chain(results_in(*slot)) {
                         if let ShapeEntry::Runtime(field) = entry {
                             if !known[field.0 as usize] {
                                 return Err(Defect::ShapeNotYetKnown {
@@ -785,5 +812,143 @@ mod tests {
         };
         let unit = result_of(matrix, Vec::new(), vec![out(72)]);
         assert_eq!(unit.check().err(), Some(Defect::KindUnsupported(STATE)));
+    }
+}
+
+#[cfg(test)]
+mod review {
+    use super::*;
+    use crate::kind::{Definition, Kinds};
+    use crate::program::StateId;
+
+    const STATE: Name = Name::State(StateId(0));
+
+    #[test]
+    fn an_empty_domain_counts_zero_whatever_the_axis_order() {
+        let domain = |extents: &[u64]| {
+            ShapeValue::Domain(
+                extents
+                    .iter()
+                    .map(|extent| Axis {
+                        origin: 0,
+                        extent: *extent,
+                    })
+                    .collect(),
+            )
+        };
+        assert_eq!(domain(&[0, u64::MAX, 2]).count(), Some(0));
+        assert_eq!(domain(&[u64::MAX, 2, 0]).count(), Some(0));
+    }
+
+    #[test]
+    fn two_leaves_in_the_same_storage_overlap_whatever_the_plane_index() {
+        let mut kinds = Kinds::default();
+        let real = kinds.define(Definition::Real);
+        let members = vec![("x".to_string(), real), ("y".to_string(), real)];
+        let kind = kinds.define(Definition::Product(members));
+        let leaf = |plane| Leaf {
+            scalar: Scalar::F32,
+            plane,
+            offset: 0,
+        };
+        let need = Need {
+            memory: Memory::Host,
+            element_bytes: 4,
+            align: 4,
+            capacity: Vec::new(),
+        };
+        let unit = Unit {
+            kinds,
+            outputs: vec![Port {
+                name: STATE,
+                kind,
+                shape: Vec::new(),
+                leaves: vec![leaf(0), leaf(1)],
+                planes: vec![Slot(0), Slot(0)],
+            }],
+            storage: vec![Storage::Output(need)],
+            stages: vec![Stage {
+                reads: Vec::new(),
+                writes: vec![Slot(0)],
+                determines: Vec::new(),
+            }],
+            ..Unit::default()
+        };
+        let overlap = Defect::LeavesOverlap {
+            first: 0,
+            second: 1,
+        };
+        assert_eq!(unit.check().err(), Some(overlap));
+    }
+
+    #[test]
+    fn a_deeply_shared_kind_is_checked_without_walking_every_scalar() {
+        let mut kinds = Kinds::default();
+        let mut kind = kinds.define(Definition::Real);
+        for _ in 0..40 {
+            kind = kinds.define(Definition::Tuple(vec![kind, kind]));
+        }
+        let unit = Unit {
+            kinds,
+            outputs: vec![Port {
+                name: STATE,
+                kind,
+                shape: Vec::new(),
+                leaves: Vec::new(),
+                planes: Vec::new(),
+            }],
+            ..Unit::default()
+        };
+        // 2^40 scalars and no leaves listed: refused at once, not after a walk.
+        assert_eq!(unit.check().err(), Some(Defect::KindMismatch(STATE)));
+    }
+
+    #[test]
+    fn every_result_sharing_storage_must_be_sized_before_it_is_written() {
+        // Two results in one slot. The first has a fixed domain; the second's
+        // is determined by the very stage that writes the slot.
+        let mut kinds = Kinds::default();
+        let real = kinds.define(Definition::Real);
+        let kind = kinds.define(Definition::Array {
+            element: real,
+            axes: vec![crate::kind::AxisKind::Closed],
+        });
+        let cells = ShapeEntry::Fixed(ShapeValue::Domain(vec![Axis {
+            origin: 0,
+            extent: 4,
+        }]));
+        let port = |shape| Port {
+            name: STATE,
+            kind,
+            shape: vec![shape],
+            leaves: vec![Leaf {
+                scalar: Scalar::F64,
+                plane: 0,
+                offset: 0,
+            }],
+            planes: vec![Slot(0)],
+        };
+        let unit = Unit {
+            kinds,
+            outputs: vec![port(cells.clone()), port(ShapeEntry::Runtime(ShapeRef(0)))],
+            storage: vec![Storage::Output(Need {
+                memory: Memory::Host,
+                element_bytes: 8,
+                align: 8,
+                capacity: vec![cells],
+            })],
+            shape_fields: vec![crate::kind::ShapeField::Domain { rank: 1 }],
+            stages: vec![Stage {
+                reads: Vec::new(),
+                writes: vec![Slot(0)],
+                determines: vec![ShapeRef(0)],
+            }],
+            ..Unit::default()
+        };
+        let late = Defect::ShapeNotYetKnown {
+            stage: 0,
+            field: ShapeRef(0),
+        };
+        assert_eq!(unit.check().err(), Some(late));
     }
 }
