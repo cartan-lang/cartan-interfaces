@@ -2,5 +2,6 @@
 name = "cartan-interfaces"
 version = "0.0.0"
 edition = "2021"
+license = "MIT"
 publish = false
 description = "Draft contracts between a Cartan compiler, the Cartan runtime and applications"
