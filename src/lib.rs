@@ -781,8 +781,9 @@ pub struct Selection {
 /// A stage is launched once, or over an extent: a domain or a length that
 /// the runtime holds before the launch. A stage with an extent computes each
 /// site of it independently: at one site it reads nothing the stage writes at
-/// another. A target may therefore visit the sites in any order or all at
-/// once. When the extent counts no sites the stage is not launched. An
+/// another, and so lists no slot among both its reads and its writes. A
+/// target may therefore visit the sites in any order or all at once. When
+/// the extent counts no sites the stage is not launched. An
 /// extent that is not fixed is among the stage's `uses`, so the code finds
 /// it in its frame.
 ///
@@ -986,6 +987,12 @@ pub enum Defect {
     /// A stage is launched over a shape value it does not list among its
     /// uses, so its code could not find the extent in its frame.
     ExtentUnused(u32),
+    /// A stage with an extent lists a slot among both its reads and its
+    /// writes, so one site could read what the stage writes at another.
+    ReadsWhatItWrites {
+        stage: u32,
+        slot: Slot,
+    },
     /// An input assumes a shape that is not one of its shape fields, is not
     /// of that field's sort, or is not determined by a stage.
     AssumedShapeUnknown {

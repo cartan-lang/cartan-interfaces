@@ -683,6 +683,18 @@ mod unit {
         let own = over(stage(&[], &[], &[0]), at(0));
         let unit = one_result(at(0), at(0), vec![own, stage(&[0], &[0], &[])]);
         assert_eq!(unit.check().defect(), Some(late));
+        // Sites are independent: a stage launched over an extent reads no
+        // slot it writes.
+        let own = Stage {
+            reads: vec![Slot(0)],
+            ..fill.clone()
+        };
+        let unit = one_result(at(0), at(0), vec![measure.clone(), own]);
+        let both = Defect::ReadsWhatItWrites {
+            stage: 1,
+            slot: Slot(0),
+        };
+        assert_eq!(unit.check().defect(), Some(both));
         // A fixed extent needs no producer, and a presence is not an extent.
         let fixed = over(stage(&[0], &[0], &[]), cells(4));
         let unit = one_result(at(0), at(0), vec![measure.clone(), fixed]);

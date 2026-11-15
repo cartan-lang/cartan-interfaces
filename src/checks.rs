@@ -1314,6 +1314,14 @@ impl Unit {
                     }
                 }
             }
+            if stage.extent.is_some() {
+                if let Some(slot) = stage.writes.iter().find(|slot| stage.reads.contains(slot)) {
+                    return Err(Defect::ReadsWhatItWrites {
+                        stage: index,
+                        slot: *slot,
+                    });
+                }
+            }
             for slot in &stage.reads {
                 storage(*slot)?;
                 // The runtime checks an input's assumed shape before any
