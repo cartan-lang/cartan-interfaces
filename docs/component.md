@@ -27,8 +27,8 @@ Every `impl`, including the checks that a description is well formed, is in
 
 ## Layers
 
-The runtime-facing sections come first. They are everything a runtime needs from
-a compiler and everything an application needs from a runtime:
+The sections are everything a runtime needs from a compiler and everything an
+application needs from a runtime:
 
 - Kinds say what a value is. A fiber is plain data of fixed width, the only
   thing an Array's element can be, and a Vector is over a field. A kind is a
@@ -55,13 +55,9 @@ a compiler and everything an application needs from a runtime:
 - Sessions are what an application asks of a runtime and what a runtime
   reports.
 
-These sections use nothing from the pipeline sections. A compiler built from
-other components implements `Supplier` and is run by the same runtime.
-`cargo check --no-default-features` builds this layer alone.
-
-The pipeline sections come last and are the contracts between the components of
-the official compiler, behind the default `pipeline` feature: syntax, graph,
-code generation and preparation. Most are placeholders.
+Nothing inside a compiler or inside a runtime is stated here. Any compiler that
+implements `Supplier` is run by the same runtime. The targets named are
+WebAssembly, Metal and CUDA.
 
 ## Open points
 
@@ -71,6 +67,6 @@ a contract that is not written yet. One starting `Decide:` names an open choice.
 
 ## Checks
 
-`cargo fmt --check`, `cargo test --locked`, `cargo check --no-default-features`,
-`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` with and without
-`--no-default-features`, and `python3 tools/docs.py check --strict`.
+`cargo fmt --check`, `cargo test --locked`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` and
+`python3 tools/docs.py check --strict`.

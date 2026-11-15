@@ -35,10 +35,9 @@ standalone clone, the essentials are:
 - Keep the declarations in one file. `src/lib.rs` holds every type and trait
   with its documentation, in reading order, and no `impl`. Every `impl`,
   including the checks, goes in `src/checks.rs`, and tests in `src/tests.rs`.
-- Keep the two layers. The runtime-facing sections (kinds, layouts, programs,
-  units, supply, sessions) come first and use nothing from the pipeline
-  sections (syntax, graph, code generation, preparation), whose every item
-  sits behind the default `pipeline` feature.
+- State only what crosses a boundary: between a compiler and a runtime, and
+  between an application and a runtime. Nothing inside a compiler or inside a
+  runtime belongs here.
 - Keep one vocabulary. Make a term a type wherever it can be one, and define
   it once, in that type's documentation. Define a word that cannot be a Rust
   item once, in the documentation of the type it bears on.
@@ -66,8 +65,6 @@ Run before every commit:
 ```sh
 cargo fmt --check
 cargo test --locked
-cargo check --no-default-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features
 python3 tools/docs.py check --strict
 ```

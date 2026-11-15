@@ -718,6 +718,39 @@ mod unit {
         assert_eq!(stored(Scalar::F32).check().defect(), mismatch);
     }
 
+    #[test]
+    fn a_table_may_hold_layouts_the_unit_does_not_use() {
+        // One slot, and a table that also holds a three-plane layout for
+        // some other unit of the same program.
+        let mut unit = one_result(cells(4), cells(4), vec![stage(&[0], &[], &[])]);
+        let real = unit.layouts.define(Layout::Scalar(Scalar::F64));
+        let parts = (0..3).map(|plane| part(real, plane, 0)).collect();
+        let wide = unit.layouts.define(Layout::Group(parts));
+        unit.layouts.define(Layout::Array(wide));
+        assert!(unit.check().is_ok());
+    }
+
+    #[test]
+    fn layouts_are_compared_across_tables_by_structure() {
+        let table = |filler: bool, offset: u32| {
+            let mut layouts = Layouts::default();
+            if filler {
+                layouts.define(Layout::Scalar(Scalar::I32));
+            }
+            let real = layouts.define(Layout::Scalar(Scalar::F32));
+            let parts = vec![part(real, 0, 0), part(real, 0, offset)];
+            let group = layouts.define(Layout::Group(parts));
+            let array = layouts.define(Layout::Array(group));
+            (layouts, array)
+        };
+        let (mine, a) = table(false, 4);
+        let (theirs, b) = table(true, 4);
+        let (packed, c) = table(false, 8);
+        assert_ne!(a, b);
+        assert!(mine.same(a, &theirs, b));
+        assert!(!mine.same(a, &packed, c));
+    }
+
     /// A unit whose only result is an Optional Array of Reals: presence in
     /// shape field 0 and the domain in field 1, storage in slot 0.
     fn optional(

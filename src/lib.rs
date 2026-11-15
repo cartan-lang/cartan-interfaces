@@ -6,15 +6,10 @@
 //! Accessors and well-formedness checks are in `checks.rs`; tests are in
 //! `tests.rs`.
 //!
-//! The runtime-facing layer defines kinds, layouts, programs, units, supply
-//! and sessions. It specifies the compiler–runtime and application–runtime
-//! boundaries without depending on the pipeline layer. An independent
-//! compiler can implement [`Supplier`] for the same runtime. Build with
-//! `--no-default-features` to compile this layer alone.
-//!
-//! The pipeline layer defines the boundaries between the official compiler's
-//! syntax, graph, code generation and preparation components. It is enabled
-//! by the `pipeline` feature.
+//! The contracts define kinds, layouts, programs, units, supply and
+//! sessions: the compiler–runtime and application–runtime boundaries. What
+//! lies inside a compiler or inside a runtime is not stated here, so any
+//! compiler can implement [`Supplier`] for the same runtime.
 //!
 //! A code generator describes compiled code as a [`Unit`]: its inputs,
 //! results, storage requirements and stages. The runtime binds inputs,
@@ -445,6 +440,9 @@ pub enum Demand {
     Initial(StateId),
     /// A Param's default value when none is supplied at launch. Defaults are
     /// closed under the same restriction as initial values.
+    ///
+    /// Decide: the layout of a value given at launch. The proposal is the
+    /// layout of this demand's result, so every unit reads a Param one way.
     Default(ParamId),
     /// The next value assigned to one State by an update block, computed from
     /// the current State.
@@ -456,6 +454,10 @@ pub enum Demand {
 /// An update is an atomic transition. All next values are computed from one
 /// version of the States, then take effect together as the run advances to
 /// the next version.
+///
+/// Decide: which update a run performs next when a program has several. A
+/// runtime that takes them in declared order, one for each version, is
+/// consistent with what is stated.
 #[derive(Clone, Debug)]
 pub struct Update {
     pub id: UpdateId,
@@ -541,6 +543,9 @@ pub struct ShapeRef(pub u32);
 ///
 /// Gap: physical representation, memory placement, transfer to consumers and
 /// notification of inapplicable shape values are unspecified.
+///
+/// Decide: what a result whose presence is fixed as absent states for the
+/// shape entries inside it. A fixed empty value for each is accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeEntry {
     Fixed(ShapeValue),
@@ -679,7 +684,7 @@ pub struct OutputPort {
 ///
 /// An input used only as a selection fallback is required only if some
 /// selection chooses it. The runtime need not hold that input while every
-/// relevant Optional is present.
+/// relevant Optional is present, and then leaves its port unbound.
 ///
 /// Gap: device-side selection and conditional demand for its fallback are
 /// unspecified.
@@ -810,7 +815,6 @@ pub struct Unit {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
-    Bytecode,
     Wasm,
     Metal,
     Cuda,
@@ -839,22 +843,20 @@ pub struct Frame {
 }
 
 /// Target code as text or bytes, prepared and loaded on the runtime side.
-///
-/// Gap: the official code generator's bytecode format has no public
-/// specification.
 pub enum Code {
-    Bytecode(Vec<u32>),
     /// A binary WebAssembly module.
     ///
     /// The module imports only `env.memory`, a linear memory owned and grown
     /// by the runtime, and has no start function. It therefore cannot call
-    /// external functions. All unit slots use `Memory::Linear`.
+    /// external functions. It may define functions it does not export. All
+    /// unit slots use `Memory::Linear`.
     ///
     /// Each stage is exported under its entry-point name as a function taking
     /// one 32-bit integer and returning nothing. The argument is the byte
     /// offset of its [`Frame`] in linear memory. Frame words are 64-bit
     /// little-endian values; each region word is the region's byte offset in
-    /// that memory.
+    /// that memory. A region may lie at offset zero: code learns which slots
+    /// apply from shape values, never by testing a region word.
     Wasm(Vec<u8>),
     Metal(String),
     Cuda(String),
@@ -1070,6 +1072,10 @@ pub trait Supplier {
     /// Compile one unit satisfying all demands for the specified target.
     fn unit(&self, demands: &[Demand], target: Target) -> Result<Emitted, Self::Diagnostic>;
 
+    /// A diagnostic as structured data, for an application's one formatter.
+    /// A diagnostic is never identified or parsed by its text.
+    fn describe(&self, diagnostic: &Self::Diagnostic) -> Report;
+
     /// The inspection commands this supplier offers.
     fn inspections(&self) -> Vec<Inspection> {
         Vec::new()
@@ -1188,246 +1194,6 @@ pub trait Session {
     fn advance(&mut self, updates: u64) -> Result<Version, Stop>;
 
     fn observe(&mut self, nodes: &[Node]) -> Result<Vec<(Node, Self::Value)>, Stop>;
-}
-
-// ===========================================================================
-// Pipeline: syntax
-// ===========================================================================
-//
-// Parsing: source text to a syntax tree with locations.
-
-/// A parsed document or expression with source locations.
-///
-/// Gap: this placeholder represents the syntax component's published tree.
-/// The portions required by Graph remain unspecified.
-#[cfg(feature = "pipeline")]
-pub struct SyntaxTree {
-    _private: (),
-}
-
-/// Parse source text, retaining diagnostics in the resulting tree.
-#[cfg(feature = "pipeline")]
-pub trait Parse {
-    fn parse_document(&self, source: &str) -> SyntaxTree;
-}
-
-// ===========================================================================
-// Pipeline: graph
-// ===========================================================================
-//
-// Source meaning: names, types, dependencies and the normalized computation.
-
-/// A resolved, typed program. The caller supplies documents and libraries;
-/// Graph performs no file reads.
-///
-/// Gap: this is a placeholder. The analysis interface available to Codegen
-/// and Compile is unspecified.
-#[cfg(feature = "pipeline")]
-pub struct Analysis {
-    _private: (),
-}
-
-/// The backing of an indexed value.
-///
-/// An indexed value consists of a domain and a rule assigning a value to each
-/// site. Its kind does not determine storage; that is a fusion decision.
-///
-/// These variants are not exhaustive. Mixed backing, with stored values at
-/// some sites and computed values elsewhere, is neither specified nor
-/// excluded.
-#[cfg(feature = "pipeline")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Backing {
-    /// Values are computed once into storage and subsequently read.
-    Stored,
-    /// Values are computed at each use without storage.
-    Lazy,
-}
-
-/// An indexed value for which Graph exposes a backing choice.
-///
-/// A named Array and an intermediate evaluated at one comprehension index
-/// both represent values at indices. Graph determines eligibility for
-/// storage: it need not offer every temporary, but cannot exclude a value
-/// solely because it is unnamed.
-///
-/// Gap: candidate discovery is unspecified.
-#[cfg(feature = "pipeline")]
-#[derive(Clone, Debug)]
-pub struct Candidate {
-    /// The derived value's identity.
-    pub value: DerivedId,
-    /// A label for plan presentation.
-    pub label: String,
-    /// A required backing when no choice is available. Results are always
-    /// stored; values unbounded along an axis cannot be stored in full.
-    pub forced: Option<Backing>,
-}
-
-/// A complete backing selection for one request, in navigator candidate
-/// order.
-///
-/// A plan can be represented and requested directly, for example by one
-/// character per candidate. With two backing choices, `n` candidates define
-/// the corners of an `n`-cube. This indexing does not imply that every plan
-/// is admissible or that single-candidate changes connect all admissible
-/// plans.
-///
-/// Decide: candidate order is fixed for an analyzed request, but stability
-/// across source changes is unresolved. Plans are not yet defined for
-/// persistence and replay.
-///
-/// Gap: a stored value may be computed within the computation or supplied as
-/// an external input; the plan does not distinguish these cases.
-#[cfg(feature = "pipeline")]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Plan {
-    pub backing: Vec<Backing>,
-}
-
-/// A normalized computation under one fusion plan.
-///
-/// Initialization, updates and later observations use the same representation
-/// and pipeline. Requests specify demands, not alternative compilers.
-///
-/// An indexed computation supplies values at requested sites. Each indexed
-/// value has a domain, a rule and the backing selected by its plan. Rules are
-/// ordinary scoped computations and may read fixed offsets, computed indices
-/// or whole domains within reductions. An unstored rule is fully known during
-/// lowering and evaluated at each use; it is neither a language value nor
-/// externally visible. Codegen implements the selected backing without
-/// choosing it.
-///
-/// At the computation boundary, an upstream binding is either a precomputed
-/// input retained by the runtime or part of the computation itself. Inputs
-/// and results are stored, but results may share existing immutable storage.
-///
-/// A value's domain may depend on data computed before filling it, such as
-/// Int values at a site of an upstream Array. It cannot depend on its own
-/// contents.
-///
-/// Gap: an Array unbounded along an axis cannot be stored in full, although
-/// every result is stored. Whether a finite window denotes a separate finite
-/// result or partial storage of the original remains unresolved.
-///
-/// The representation must preserve shared structure. Values used in several
-/// places, rules evaluated at several offsets and expressions shared across
-/// conditional branches are defined once and referenced. It must neither
-/// require expansion at each use nor prevent hoisting on either side.
-///
-/// Gap: the representation consumed by Codegen, including its domains and
-/// rules, is unspecified.
-#[cfg(feature = "pipeline")]
-pub struct Computation {
-    _private: (),
-}
-
-/// Access to Graph's fusion plans for one request.
-///
-/// The interface lists eligible candidates and maps a complete backing
-/// selection to a computation or a diagnostic. Plans select backing only for
-/// these candidates. Manual choice and systematic search use the same
-/// interface.
-///
-/// Decide: the chooser and its access to runtime-held values are unresolved.
-/// A prepared unit's inputs are fixed; changing the plan produces a different
-/// unit. A binding invariant under unchanged dependencies may become an
-/// input, but inexpensive bindings may remain inline. Independence from the
-/// States written by one update does not imply constancy: Params or other
-/// updates may change its dependencies.
-#[cfg(feature = "pipeline")]
-pub trait Navigate {
-    type Diagnostic;
-
-    /// Candidates in plan order.
-    fn candidates(&self) -> &[Candidate];
-
-    /// Graph's default plan.
-    fn start(&self) -> Plan;
-
-    /// The selected computation, or a diagnostic explaining why the plan is
-    /// unavailable.
-    fn computation(&self, plan: &Plan) -> Result<Computation, Self::Diagnostic>;
-}
-
-/// Analyze a source and expose fusion plans for the requested demands.
-#[cfg(feature = "pipeline")]
-pub trait Analyze {
-    type Diagnostic;
-    type Navigator: Navigate<Diagnostic = Self::Diagnostic>;
-
-    fn analyze(
-        &self,
-        root: &SyntaxTree,
-        libraries: &[(&str, &SyntaxTree)],
-    ) -> Result<Analysis, Self::Diagnostic>;
-
-    fn program<'a>(&self, analysis: &'a Analysis) -> &'a Program;
-
-    fn plans(
-        &self,
-        analysis: &Analysis,
-        demands: &[Demand],
-    ) -> Result<Self::Navigator, Self::Diagnostic>;
-}
-
-// ===========================================================================
-// Pipeline: code generation
-// ===========================================================================
-//
-// Target emission: a computation becomes code and its unit description.
-
-/// Lower a computation to target code and its `Unit` description.
-///
-/// Codegen selects scalar representations, planes and offsets. It does not
-/// select the computation or its inputs.
-///
-/// Gap: binding requires identical layouts, but this interface neither
-/// communicates existing value layouts nor requests conversions. Units may
-/// agree on kind while differing in layout.
-#[cfg(feature = "pipeline")]
-pub trait Emit {
-    type Diagnostic;
-
-    fn emit(&self, computation: &Computation, target: Target) -> Result<Emitted, Self::Diagnostic>;
-}
-
-// ===========================================================================
-// Pipeline: preparation
-// ===========================================================================
-//
-// Immutable preparation: emitted text or bytes become loadable code.
-
-/// Immutable prepared code with its checked unit description preserved.
-///
-/// Prepared code may be loaded on several devices of one architecture and
-/// executed repeatedly.
-///
-/// Gap: preparation accepts any supplier's output but belongs to the pipeline
-/// layer, leaving runtimes without that feature no preparation contract.
-/// Preparation also uses a live backend context while promising reuse across
-/// devices; the result's relationship to that context is unspecified.
-#[cfg(feature = "pipeline")]
-pub struct Prepared<C> {
-    unit: Checked,
-    code: C,
-}
-
-/// Convert any supplier's emitted text or bytes into loadable code within an
-/// existing backend context, allowing requests after launch to join the
-/// running program.
-#[cfg(feature = "pipeline")]
-pub trait Prepare {
-    type Context;
-    type Code;
-    type Diagnostic;
-
-    fn prepare(
-        &self,
-        emitted: Emitted,
-        context: &Self::Context,
-    ) -> Result<Prepared<Self::Code>, Self::Diagnostic>;
 }
 
 // Well-formedness checks and all other implementations.

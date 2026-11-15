@@ -361,6 +361,61 @@ impl Layouts {
         self.definitions.get(layout.0 as usize)
     }
 
+    /// Compare layouts across tables. Each pair of layouts is compared once,
+    /// however often it is shared.
+    pub fn same(&self, layout: LayoutRef, other: &Layouts, theirs: LayoutRef) -> bool {
+        self.same_layout(layout, other, theirs, &mut HashMap::new())
+    }
+
+    fn same_layout(
+        &self,
+        layout: LayoutRef,
+        other: &Layouts,
+        theirs: LayoutRef,
+        known: &mut HashMap<(LayoutRef, LayoutRef), bool>,
+    ) -> bool {
+        if let Some(answer) = known.get(&(layout, theirs)) {
+            return *answer;
+        }
+        let alike = match (self.get(layout), other.get(theirs)) {
+            (Some(Layout::Scalar(a)), Some(Layout::Scalar(b))) => a == b,
+            (Some(Layout::Group(a)), Some(Layout::Group(b))) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(a, b)| {
+                        a.plane == b.plane
+                            && a.offset == b.offset
+                            && self.same_layout(a.layout, other, b.layout, known)
+                    })
+            }
+            (
+                Some(Layout::Repeat {
+                    part: a,
+                    count: a_count,
+                    plane_step: a_plane,
+                    offset_step: a_offset,
+                }),
+                Some(Layout::Repeat {
+                    part: b,
+                    count: b_count,
+                    plane_step: b_plane,
+                    offset_step: b_offset,
+                }),
+            ) => {
+                a_count == b_count
+                    && a_plane == b_plane
+                    && a_offset == b_offset
+                    && self.same_layout(*a, other, *b, known)
+            }
+            (Some(Layout::Array(a)), Some(Layout::Array(b)))
+            | (Some(Layout::Optional(a)), Some(Layout::Optional(b))) => {
+                self.same_layout(*a, other, *b, known)
+            }
+            _ => false,
+        };
+        known.insert((layout, theirs), alike);
+        alike
+    }
+
     fn children(layout: &Layout) -> Vec<LayoutRef> {
         match layout {
             Layout::Scalar(_) => Vec::new(),
@@ -937,8 +992,9 @@ impl Unit {
         self.kinds.check().map_err(Defect::Kind)?;
         let scalars = self.kinds.scalar_counts();
         let facts = self.kinds.shape_field_counts();
-        let most_planes = u32::try_from(self.storage.len()).unwrap_or(u32::MAX);
-        let measures = self.layouts.measure(most_planes).map_err(Defect::Layout)?;
+        // A table may hold layouts this unit does not use, so no layout is
+        // limited by the unit's storage; each port's planes are counted below.
+        let measures = self.layouts.measure(u32::MAX).map_err(Defect::Layout)?;
 
         // Shape values originate from bound inputs or stages.
         let mut produced = vec![false; self.shape_fields.len()];
@@ -1164,22 +1220,5 @@ impl Unit {
                 governs,
             })),
         }
-    }
-}
-
-// Pipeline: preparation
-
-#[cfg(feature = "pipeline")]
-impl<C> Prepared<C> {
-    pub fn new(unit: Checked, code: C) -> Self {
-        Self { unit, code }
-    }
-
-    pub fn unit(&self) -> &Unit {
-        self.unit.unit()
-    }
-
-    pub fn code(&self) -> &C {
-        &self.code
     }
 }
