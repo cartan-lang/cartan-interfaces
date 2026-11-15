@@ -346,12 +346,33 @@ impl Scalar {
 }
 
 impl Kinds {
-    /// A kind written as a document would write it.
+    /// A kind written as a document would write it, with every fiber
+    /// written by its structure.
     pub fn notation(&self, kind: KindRef) -> String {
+        self.notation_with(kind, &|_| None)
+    }
+
+    /// A fiber written as a document would write it, by its structure.
+    pub fn fiber_notation(&self, fiber: FiberRef) -> String {
+        self.fiber_notation_with(fiber, &|_| None)
+    }
+
+    /// Whether two fibers in two validated tables are the same.
+    pub fn same_fibers(&self, fiber: FiberRef, other: &Kinds, theirs: FiberRef) -> bool {
+        self.same_fiber(fiber, other, theirs, &mut Compared::default())
+    }
+
+    /// A kind written as a document would write it. A fiber that `named`
+    /// answers for is written by that name.
+    pub fn notation_with(
+        &self,
+        kind: KindRef,
+        named: &dyn Fn(FiberRef) -> Option<String>,
+    ) -> String {
         match self.get(kind) {
-            Some(Kind::Fiber(fiber)) => self.fiber_notation(*fiber),
+            Some(Kind::Fiber(fiber)) => self.fiber_notation_with(*fiber, named),
             Some(Kind::Array { element, axes }) => {
-                let element = self.fiber_notation(*element);
+                let element = self.fiber_notation_with(*element, named);
                 if axes.iter().all(|axis| *axis == AxisKind::Closed) {
                     format!("Array<{element}, {}>", axes.len())
                 } else {
@@ -359,25 +380,33 @@ impl Kinds {
                     format!("Array<{element}, [{}]>", axes.join(", "))
                 }
             }
-            Some(Kind::Optional(inner)) => format!("{}|None", self.notation(*inner)),
+            Some(Kind::Optional(inner)) => format!("{}|None", self.notation_with(*inner, named)),
             Some(Kind::Struct(members)) => {
                 let members: Vec<String> = members
                     .iter()
-                    .map(|(name, kind)| format!("{name}: {}", self.notation(*kind)))
+                    .map(|(name, kind)| format!("{name}: {}", self.notation_with(*kind, named)))
                     .collect();
                 format!("{{{}}}", members.join(", "))
             }
             Some(Kind::Tuple(positions)) => {
-                let positions: Vec<String> =
-                    positions.iter().map(|kind| self.notation(*kind)).collect();
+                let positions: Vec<String> = positions
+                    .iter()
+                    .map(|kind| self.notation_with(*kind, named))
+                    .collect();
                 format!("({})", positions.join(", "))
             }
             None => "?".to_string(),
         }
     }
 
-    /// A fiber written as a document would write it.
-    pub fn fiber_notation(&self, fiber: FiberRef) -> String {
+    fn fiber_notation_with(
+        &self,
+        fiber: FiberRef,
+        named: &dyn Fn(FiberRef) -> Option<String>,
+    ) -> String {
+        if let Some(name) = named(fiber) {
+            return name;
+        }
         let field = |field: &Field| match field {
             Field::Real => "Real",
             Field::Rational => "Rational",
@@ -399,7 +428,9 @@ impl Kinds {
             Some(Fiber::Product(members)) => {
                 let members: Vec<String> = members
                     .iter()
-                    .map(|(name, fiber)| format!("{name}: {}", self.fiber_notation(*fiber)))
+                    .map(|(name, fiber)| {
+                        format!("{name}: {}", self.fiber_notation_with(*fiber, named))
+                    })
                     .collect();
                 format!("({})", members.join(", "))
             }
@@ -407,7 +438,9 @@ impl Kinds {
                 let variants: Vec<String> = variants
                     .iter()
                     .map(|(name, payload)| match payload {
-                        Some(fiber) => format!("{name}({})", self.fiber_notation(*fiber)),
+                        Some(fiber) => {
+                            format!("{name}({})", self.fiber_notation_with(*fiber, named))
+                        }
                         None => name.clone(),
                     })
                     .collect();
@@ -415,6 +448,20 @@ impl Kinds {
             }
             None => "?".to_string(),
         }
+    }
+}
+
+impl Program {
+    /// A kind from any table written as a document would write it, with each
+    /// declared fiber written by its name. Where two declarations have the
+    /// same structure, the first name is used.
+    pub fn notation(&self, kinds: &Kinds, kind: KindRef) -> String {
+        kinds.notation_with(kind, &|fiber| {
+            self.fibers
+                .iter()
+                .find(|(_, named)| kinds.same_fibers(fiber, &self.kinds, *named))
+                .map(|(name, _)| name.clone())
+        })
     }
 }
 

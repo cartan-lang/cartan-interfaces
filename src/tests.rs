@@ -731,6 +731,25 @@ mod unit {
         let optional = kinds.define(Kind::Optional(array));
         let written = "Array<(rho: Real, mom: Real), 2>|None";
         assert_eq!(kinds.notation(optional), written);
+
+        // A unit's own table states the same fiber at another place; the
+        // program's name for it is still found.
+        let mut program = Program {
+            kinds: kinds.clone(),
+            ..Program::default()
+        };
+        program.fibers.push(("Conserved".to_string(), element));
+        let mut unit = Kinds::default();
+        unit.fiber(Fiber::Int);
+        let real = unit.fiber(Fiber::Real);
+        let members = vec![("rho".to_string(), real), ("mom".to_string(), real)];
+        let element = unit.fiber(Fiber::Product(members));
+        let array = unit.define(Kind::Array {
+            element,
+            axes: vec![AxisKind::Closed, AxisKind::Closed],
+        });
+        assert_eq!(program.notation(&unit, array), "Array<Conserved, 2>");
+        assert_eq!(unit.notation(array), "Array<(rho: Real, mom: Real), 2>");
     }
 
     #[test]

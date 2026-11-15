@@ -477,6 +477,10 @@ pub struct Update {
 pub struct Program {
     /// Unique kind definitions used by declared nodes.
     pub kinds: Kinds,
+    /// The names the source declares for fibers, in source order, each
+    /// referring to `kinds`. A name is how a value is shown; it is no part of
+    /// a fiber's identity, so two names may refer to one fiber.
+    pub fibers: Vec<(String, FiberRef)>,
     pub declared: Vec<Declared>,
     /// Update blocks in source order, which does not prescribe execution
     /// order. All writes from one execution of a block take effect
