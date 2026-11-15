@@ -429,6 +429,11 @@ pub struct Declared {
     pub label: String,
     /// A reference into the program's table of kinds.
     pub kind: KindRef,
+    /// The type the author wrote on this declaration, as written, when there
+    /// is one. It is how the declaration is shown to the author. A name in
+    /// it is an alias: it has no part in the kind, and a kind is never shown
+    /// by a name the author did not write there.
+    pub written: Option<String>,
 }
 
 /// A computation requested from a supplier.
@@ -477,10 +482,6 @@ pub struct Update {
 pub struct Program {
     /// Unique kind definitions used by declared nodes.
     pub kinds: Kinds,
-    /// The names the source declares for fibers, in source order, each
-    /// referring to `kinds`. A name is how a value is shown; it is no part of
-    /// a fiber's identity, so two names may refer to one fiber.
-    pub fibers: Vec<(String, FiberRef)>,
     pub declared: Vec<Declared>,
     /// Update blocks in source order, which does not prescribe execution
     /// order. All writes from one execution of a block take effect
