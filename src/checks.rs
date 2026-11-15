@@ -878,6 +878,11 @@ impl Checked {
                 consumers.push(Consumer::Extent(index as u32));
             }
         }
+        for (index, input) in unit.inputs.iter().enumerate() {
+            if input.assumes.iter().any(|assumed| assumed.equals == shape) {
+                consumers.push(Consumer::Input(index as u32));
+            }
+        }
         for (index, storage) in unit.storage.iter().enumerate() {
             if let Storage::Output(need) | Storage::Scratch(need) = storage {
                 if need.capacity.0.contains(&named) {
@@ -1248,6 +1253,30 @@ impl Unit {
             }
         }
 
+        // What an input assumes of its shape is a value some stage
+        // determines, of the sort of the field it is assumed for.
+        let mut assumes: Vec<Vec<ShapeRef>> = vec![Vec::new(); self.storage.len()];
+        for (index, port) in self.inputs.iter().enumerate() {
+            let stated = self.kinds.shape_fields(port.kind);
+            for assumed in &port.assumes {
+                let field = stated.get(assumed.field as usize);
+                let named = self.shape_fields.get(assumed.equals.0 as usize);
+                let determined = self
+                    .stages
+                    .iter()
+                    .any(|stage| stage.determines.contains(&assumed.equals));
+                if field.is_none() || field != named || !determined {
+                    return Err(Defect::AssumedShapeUnknown {
+                        input: index as u32,
+                        equals: assumed.equals,
+                    });
+                }
+                for slot in &port.planes {
+                    assumes[slot.0 as usize].push(assumed.equals);
+                }
+            }
+        }
+
         // Enforce production before consumption and unique shape producers.
         let mut provided = vec![false; self.storage.len()];
         for (index, stage) in self.stages.iter().enumerate() {
@@ -1287,6 +1316,14 @@ impl Unit {
             }
             for slot in &stage.reads {
                 storage(*slot)?;
+                // The runtime checks an input's assumed shape before any
+                // stage reads the input, so it is determined earlier.
+                if let Some(field) = assumes[slot.0 as usize]
+                    .iter()
+                    .find(|field| !produced[field.0 as usize])
+                {
+                    return Err(late(*field));
+                }
             }
             for slot in &stage.writes {
                 let (Storage::Output(need) | Storage::Scratch(need)) = storage(*slot)? else {

@@ -463,6 +463,7 @@ mod unit {
                 layout,
                 shape,
                 planes,
+                assumes: Vec::new(),
             }
         }
     }
@@ -582,6 +583,77 @@ mod unit {
         };
         let blind = one_result(at(0), cells(100), vec![stage(&[0], &[], &[0])]);
         assert_eq!(blind.check().defect(), Some(unused));
+    }
+
+    #[test]
+    fn an_input_may_assume_a_shape_that_a_stage_determines() {
+        // An input Array brings its own domain, field 0. A measure stage
+        // determines field 1, and the result is filled over field 1 reading
+        // the input on the assumption that the two are equal.
+        let unit = |assumed: Vec<Assumed>, stages: Vec<Stage>| {
+            let mut tables = Tables::default();
+            let (array, layout) = tables.reals();
+            let mut input: InputPort = tables.port(array, layout, vec![at(0)], &[0]);
+            input.assumes = assumed;
+            let output = tables.port(array, layout, vec![at(1)], &[1]);
+            Unit {
+                inputs: vec![input],
+                outputs: vec![output],
+                storage: vec![
+                    Storage::Input(need(8, vec![at(0)])),
+                    Storage::Output(need(8, vec![at(1)])),
+                ],
+                shape_fields: vec![
+                    ShapeField::Domain { rank: 1 },
+                    ShapeField::Domain { rank: 1 },
+                ],
+                stages,
+                ..tables.unit()
+            }
+        };
+        let reading = |stage: Stage| Stage {
+            reads: vec![Slot(0)],
+            ..stage
+        };
+        let equal = vec![Assumed {
+            field: 0,
+            equals: ShapeRef(1),
+        }];
+        let measure = stage(&[], &[], &[1]);
+        let fill = reading(stage(&[1], &[1], &[]));
+        let checked = unit(equal.clone(), vec![measure.clone(), fill.clone()])
+            .check()
+            .expect("a well-formed unit");
+        assert_eq!(checked.producer(ShapeRef(1)), Some(Producer::Stage(0)));
+        assert!(checked.consumers(ShapeRef(1)).contains(&Consumer::Input(0)));
+
+        // A stage that reads the input comes after the shape it assumes.
+        let late = Defect::ShapeNotYetKnown {
+            stage: 0,
+            field: ShapeRef(1),
+        };
+        let early = reading(stage(&[], &[], &[]));
+        let stages = vec![early, measure.clone(), fill.clone()];
+        assert_eq!(unit(equal, stages).check().defect(), Some(late));
+
+        // What is assumed is one of the port's fields and a determined value.
+        let unknown = |equals: u32| {
+            Some(Defect::AssumedShapeUnknown {
+                input: 0,
+                equals: ShapeRef(equals),
+            })
+        };
+        let own = vec![Assumed {
+            field: 0,
+            equals: ShapeRef(0),
+        }];
+        let stages = vec![measure.clone(), fill.clone()];
+        assert_eq!(unit(own, stages.clone()).check().defect(), unknown(0));
+        let beyond = vec![Assumed {
+            field: 3,
+            equals: ShapeRef(1),
+        }];
+        assert_eq!(unit(beyond, stages).check().defect(), unknown(1));
     }
 
     #[test]

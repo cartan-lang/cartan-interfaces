@@ -669,6 +669,21 @@ pub struct InputPort {
     /// One storage slot per layout plane. Distinct planes of one value cannot
     /// share storage.
     pub planes: Vec<Slot>,
+    /// What the code assumes of the bound value's shape beyond what the port
+    /// brings: each entry says that one of the port's shape fields equals a
+    /// shape value that a stage determines. The runtime compares the two
+    /// once it holds the determined value, before any stage that reads the
+    /// input's storage, and refuses the binding if they differ. Code may
+    /// then read the input on the strength of that shape without testing it.
+    pub assumes: Vec<Assumed>,
+}
+
+/// One shape field of an input, by its place in the port's `shape`, and the
+/// stage-determined shape value the code assumes it equals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Assumed {
+    pub field: u32,
+    pub equals: ShapeRef,
 }
 
 /// A computed result satisfying one demand. Kind, layout, shape and storage
@@ -971,6 +986,12 @@ pub enum Defect {
     /// A stage is launched over a shape value it does not list among its
     /// uses, so its code could not find the extent in its frame.
     ExtentUnused(u32),
+    /// An input assumes a shape that is not one of its shape fields, is not
+    /// of that field's sort, or is not determined by a stage.
+    AssumedShapeUnknown {
+        input: u32,
+        equals: ShapeRef,
+    },
     /// A stage writes a slot it does not own.
     WritesShared {
         stage: u32,
@@ -1087,6 +1108,8 @@ pub enum Consumer {
     Selection(u32),
     /// This stage is launched over it.
     Extent(u32),
+    /// This input's shape is checked against it at binding.
+    Input(u32),
 }
 
 // ===========================================================================
