@@ -383,6 +383,8 @@ pub struct Measures {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StateId(pub u32);
 
+/// A Param is fixed over a run: its value is given, or defaults, when the run
+/// begins and does not change until another run begins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParamId(pub u32);
 
