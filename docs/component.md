@@ -69,4 +69,5 @@ a contract that is not written yet. One starting `Decide:` names an open choice.
 
 `cargo fmt --check`, `cargo test --locked`,
 `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` and
-`python3 tools/docs.py check --strict`.
+`uv run --no-sync cartdev docs check --root cartan-interfaces --strict` from
+the workspace root.

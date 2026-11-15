@@ -66,5 +66,6 @@ Run before every commit:
 cargo fmt --check
 cargo test --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-python3 tools/docs.py check --strict
+# From the workspace root:
+uv run --no-sync cartdev docs check --root cartan-interfaces --strict
 ```
