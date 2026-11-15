@@ -318,6 +318,11 @@ pub enum Layout {
     },
     /// An Array with one element at each domain site, using the element's
     /// planes. Its sole shape field is the domain.
+    ///
+    /// Sites are stored in the order of their indices with the last axis
+    /// varying fastest: the element at index `(i, j)` of a domain with
+    /// origins `(a, b)` and extents `(m, n)` is element `(i - a) * n +
+    /// (j - b)` of each plane.
     Array(LayoutRef),
     /// An Optional whose shape fields begin with presence, followed by those
     /// of its inner value.
