@@ -885,6 +885,11 @@ pub enum Code {
     ///
     /// A stage with an extent is still one call: the function visits every
     /// site itself.
+    ///
+    /// Gap: a stage cannot be launched over part of its extent, as running
+    /// it on several cores would need. The extent in the frame is the shape
+    /// value the code also takes addresses from, so a range of sites to
+    /// visit would have to be stated apart from it.
     Wasm(Vec<u8>),
     /// Metal Shading Language source, compiled by the runtime.
     ///
@@ -893,7 +898,8 @@ pub enum Code {
     /// little-endian words, and buffer `1 + k` is the memory
     /// `Memory::Device(k)`. Each region word is the region's byte offset in
     /// its memory's buffer. All unit slots use `Memory::Device`. The frame
-    /// is a buffer of its own for each launch, and the kernel may write it.
+    /// is private to its launch until the launch completes, and the kernel
+    /// may write it.
     ///
     /// A stage with an extent is dispatched over a grid with one thread for
     /// each site. A thread's position along the grid's first dimension is its
@@ -909,6 +915,11 @@ pub enum Code {
     /// Metal has, so no 64-bit Real is stored.
     ///
     /// Gap: an extent of rank above three.
+    ///
+    /// Gap: a shape value determined on a device reaches a later stage on
+    /// that device only through the host, which waits for it and writes it
+    /// into the later frame. A determined shape value that a later frame
+    /// could refer to in place would remove that wait.
     Metal(String),
     Cuda(String),
 }
