@@ -60,7 +60,8 @@ pub enum Primitive {
 
 /// The form of an Array axis, as part of the Array's kind. Arrays with
 /// different axis forms have different kinds. Every axis has an explicit
-/// form; a written type specifying only rank denotes closed axes.
+/// form here. A type written in a document with only a rank leaves each form
+/// to be inferred from the values assigned.
 ///
 /// Gap: the representation of a finite stored portion of an axis with an open
 /// end is unspecified.
