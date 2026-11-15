@@ -891,7 +891,8 @@ pub enum Code {
     /// value the code also takes addresses from, so a range of sites to
     /// visit would have to be stated apart from it.
     Wasm(Vec<u8>),
-    /// Metal Shading Language source, compiled by the runtime.
+    /// Metal Shading Language source, compiled by the runtime with fast
+    /// math disabled, so that each operation is done as written.
     ///
     /// Each stage is a kernel function named by its entry point. Its
     /// arguments are buffers: buffer 0 holds the stage's [`Frame`] as 64-bit
