@@ -874,6 +874,9 @@ impl Checked {
             if stage.uses.contains(&shape) {
                 consumers.push(Consumer::Stage(index as u32));
             }
+            if stage.extent == Some(named.clone()) {
+                consumers.push(Consumer::Extent(index as u32));
+            }
         }
         for (index, storage) in unit.storage.iter().enumerate() {
             if let Storage::Output(need) | Storage::Scratch(need) = storage {
@@ -1260,6 +1263,23 @@ impl Unit {
             for field in &stage.uses {
                 if !produced[place(field)?] {
                     return Err(late(*field));
+                }
+            }
+            // The runtime holds a stage's extent before it launches it.
+            match &stage.extent {
+                None => {}
+                Some(ShapeEntry::Fixed(ShapeValue::Presence(_))) => {
+                    return Err(Defect::ExtentNotACount(index));
+                }
+                Some(ShapeEntry::Fixed(_)) => {}
+                Some(ShapeEntry::Runtime(field)) => {
+                    let at = place(field)?;
+                    if self.shape_fields[at] == ShapeField::Presence {
+                        return Err(Defect::ExtentNotACount(index));
+                    }
+                    if !produced[at] {
+                        return Err(late(*field));
+                    }
                 }
             }
             for slot in &stage.reads {

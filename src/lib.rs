@@ -763,13 +763,16 @@ pub struct Selection {
 /// Gap: stage placement is unspecified. Code targets one backend, so a stage
 /// whose inputs are all host-available cannot be placed on the host.
 ///
-/// Gap: the relationship between consumed shape values and dispatch extent is
-/// unspecified.
+/// A stage is launched once, or over an extent: a domain or a length that
+/// the runtime holds before the launch. A stage with an extent computes each
+/// site of it independently: at one site it reads nothing the stage writes at
+/// another. A target may therefore visit the sites in any order or all at
+/// once. When the extent counts no sites the stage is not launched.
 ///
-/// The WebAssembly calling convention passes slots and shape values through a
-/// [`Frame`], as specified by [`Code::Wasm`].
+/// Slots and shape values are passed through a [`Frame`]. [`Code::Wasm`] and
+/// [`Code::Metal`] state how a stage is called and how its extent is visited.
 ///
-/// Gap: stage calling conventions for other targets are unspecified.
+/// Gap: the calling convention for CUDA is unspecified.
 #[derive(Clone, Debug, Default)]
 pub struct Stage {
     /// The stage's entry-point name.
@@ -783,6 +786,9 @@ pub struct Stage {
     pub uses: Vec<ShapeRef>,
     /// Shape values this stage produces.
     pub determines: Vec<ShapeRef>,
+    /// What the stage is launched over: a domain or a length. `None` is one
+    /// launch with no sites, as for a stage that only determines shape values.
+    pub extent: Option<ShapeEntry>,
 }
 
 /// A compiled computation's runtime description.
@@ -870,7 +876,31 @@ pub enum Code {
     /// little-endian values; each region word is the region's byte offset in
     /// that memory. A region may lie at offset zero: code learns which slots
     /// apply from shape values, never by testing a region word.
+    ///
+    /// A stage with an extent is still one call: the function visits every
+    /// site itself.
     Wasm(Vec<u8>),
+    /// Metal Shading Language source, compiled by the runtime.
+    ///
+    /// Each stage is a kernel function named by its entry point. Its
+    /// arguments are buffers: buffer 0 holds the stage's [`Frame`] as 64-bit
+    /// little-endian words, and buffer `1 + k` is the memory
+    /// `Memory::Device(k)`. Each region word is the region's byte offset in
+    /// its memory's buffer. All unit slots use `Memory::Device`.
+    ///
+    /// A stage with an extent is dispatched over a grid with one thread for
+    /// each site. A thread's position along the grid's first dimension is its
+    /// site's offset from the origin on the last axis; the second dimension
+    /// is the axis before that, and the third the axis before that. A thread
+    /// whose position lies outside the extent does nothing, so a runtime may
+    /// round the grid up. A stage with no extent is dispatched with one
+    /// thread.
+    ///
+    /// A stage that determines shape values writes them into its frame, where
+    /// the runtime reads them once the stage has completed. Scalars are those
+    /// Metal has, so no 64-bit Real is stored.
+    ///
+    /// Gap: an extent of rank above three.
     Metal(String),
     Cuda(String),
 }
@@ -916,6 +946,8 @@ pub enum Defect {
     OutputPlaneNotResult(Slot),
     /// An alias must refer to an input slot.
     AliasOfNonInput(Slot),
+    /// A stage's extent is neither a domain nor a length.
+    ExtentNotACount(u32),
     /// A stage writes a slot it does not own.
     WritesShared {
         stage: u32,
@@ -1030,6 +1062,8 @@ pub enum Consumer {
     Result(u32),
     /// A selection whose choice depends on this shape value.
     Selection(u32),
+    /// This stage is launched over it.
+    Extent(u32),
 }
 
 // ===========================================================================

@@ -437,6 +437,7 @@ mod unit {
             writes: writes.iter().map(|slot| Slot(*slot)).collect(),
             uses: fields(uses),
             determines: fields(determines),
+            extent: None,
         }
     }
 
@@ -581,6 +582,39 @@ mod unit {
         };
         let blind = one_result(at(0), cells(100), vec![stage(&[0], &[], &[0])]);
         assert_eq!(blind.check().defect(), Some(unused));
+    }
+
+    #[test]
+    fn a_stage_is_launched_over_a_domain_the_runtime_already_holds() {
+        let over = |stage: Stage, extent: ShapeEntry| Stage {
+            extent: Some(extent),
+            ..stage
+        };
+        // A stage determines the domain; a later stage is launched over it.
+        let measure = stage(&[], &[], &[0]);
+        let fill = over(stage(&[0], &[0], &[]), at(0));
+        let checked = one_result(at(0), at(0), vec![measure.clone(), fill.clone()])
+            .check()
+            .expect("a well-formed unit");
+        assert!(checked
+            .consumers(ShapeRef(0))
+            .contains(&Consumer::Extent(1)));
+        // A stage cannot be launched over a domain it determines itself.
+        let late = Defect::ShapeNotYetKnown {
+            stage: 0,
+            field: ShapeRef(0),
+        };
+        let own = over(stage(&[], &[], &[0]), at(0));
+        let unit = one_result(at(0), at(0), vec![own, stage(&[0], &[0], &[])]);
+        assert_eq!(unit.check().defect(), Some(late));
+        // A fixed extent needs no producer, and a presence is not an extent.
+        let fixed = over(stage(&[0], &[0], &[]), cells(4));
+        let unit = one_result(at(0), at(0), vec![measure.clone(), fixed]);
+        assert!(unit.check().is_ok());
+        let absent = ShapeEntry::Fixed(ShapeValue::Presence(true));
+        let wrong = over(stage(&[0], &[0], &[]), absent);
+        let unit = one_result(at(0), at(0), vec![measure, wrong]);
+        assert_eq!(unit.check().defect(), Some(Defect::ExtentNotACount(1)));
     }
 
     #[test]
