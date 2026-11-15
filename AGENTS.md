@@ -1,7 +1,7 @@
 # Working in cartan-interfaces
 
-Read README and docs/component.md first. Shared rules, workflow commands,
-ownership and the HANDOFF shape are in the workspace
+Read README and the crate header in `src/lib.rs` first. Shared rules, workflow
+commands, ownership and the HANDOFF shape are in the workspace
 [AGENTS.md](../AGENTS.md); joint Codex/Claude operation, ownership handback and
 mailboxes are in [joint operation](../docs/records/joint-operation.md). In a
 standalone clone, the essentials are:
@@ -12,8 +12,10 @@ standalone clone, the essentials are:
   period or prefix, the configured Git identity, no agent attribution or
   co-author trailers; stage explicit paths; no push or publication without owner
   authorization.
-- Documentation follows [docs/documentation.md](docs/documentation.md): current
-  state only, one home per fact, done work items deleted after consolidation.
+- Documentation follows the workspace's
+  [conventions](../docs/documentation.md), of which a standalone clone has no
+  copy: current state only, one home per fact, done work items deleted after
+  consolidation.
 - HANDOFF.md is ignored session state, never committed.
 - Design from requirements before accommodating what exists, and escalate when
   an architectural change makes an obviously simpler contract possible.
@@ -66,6 +68,4 @@ Run before every commit:
 cargo fmt --check
 cargo test --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-# From the workspace root:
-uv run --no-sync cartdev docs check --root cartan-interfaces --strict
 ```
