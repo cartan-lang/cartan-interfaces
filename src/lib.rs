@@ -6,10 +6,11 @@
 //! Accessors and well-formedness checks are in `checks.rs`; tests are in
 //! `tests.rs`.
 //!
-//! The contracts define kinds, layouts, programs, units, supply and
-//! sessions: the compiler–runtime and application–runtime boundaries. What
-//! lies inside a compiler or inside a runtime is not stated here, so any
-//! compiler can implement [`Supplier`] for the same runtime.
+//! The contracts define kinds, layouts, programs, units and supply, with
+//! the versions and stops of a run: the boundary between a compiler and a
+//! runtime. What lies inside either is not stated here, so any compiler can
+//! implement [`Supplier`] for the same runtime. What an application asks of
+//! a runtime is not stated either, while both live in one repository.
 //!
 //! A code generator describes compiled code as a [`Unit`]: its inputs,
 //! results, storage requirements and stages. The runtime binds inputs,
@@ -454,8 +455,8 @@ pub enum Demand {
     /// A Param's default value when none is supplied at launch. Defaults are
     /// closed under the same restriction as initial values.
     ///
-    /// Decide: the layout of a value given at launch. The proposal is the
-    /// layout of this demand's result, so every unit reads a Param one way.
+    /// A value given at launch is stored with the layout of this demand's
+    /// result, so every unit reads a Param one way.
     Default(ParamId),
     /// The next value assigned to one State by an update block, computed from
     /// the current State.
@@ -557,8 +558,8 @@ pub struct ShapeRef(pub u32);
 /// Gap: physical representation, memory placement, transfer to consumers and
 /// notification of inapplicable shape values are unspecified.
 ///
-/// Decide: what a result whose presence is fixed as absent states for the
-/// shape entries inside it. A fixed empty value for each is accepted.
+/// A result whose presence is fixed as absent states a fixed empty value
+/// for each shape entry inside it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeEntry {
     Fixed(ShapeValue),
@@ -654,8 +655,8 @@ pub enum Storage {
 /// The layout must represent the kind. The port supplies one shape value per
 /// shape field in kind order and one slot per layout plane.
 ///
-/// Decide: binding requires identical layouts. Any layout conversion would be
-/// an explicit computation, never an implicit operation during binding.
+/// Binding requires identical layouts. Any layout conversion is an explicit
+/// computation, never an implicit operation during binding.
 #[derive(Clone, Debug)]
 pub struct InputPort {
     /// The node whose value this is.
@@ -1183,13 +1184,16 @@ pub trait Supplier {
     }
 
     /// Run an inspection, returning `None` if the command is unavailable.
+    /// A view that depends on the target, such as a unit's code, shows what
+    /// would be supplied for `target`, the one the session runs on.
     fn inspect(
         &self,
         component: &str,
         view: &str,
         arguments: &[String],
+        target: Target,
     ) -> Option<Result<Report, Self::Diagnostic>> {
-        let _ = (component, view, arguments);
+        let _ = (component, view, arguments, target);
         None
     }
 }
@@ -1226,7 +1230,7 @@ pub enum Report {
 }
 
 // ===========================================================================
-// Sessions: application interaction with the runtime
+// Runs: versions and stops
 // ===========================================================================
 //
 // The runtime owns each run and its storage. Several atomic updates may
@@ -1266,35 +1270,6 @@ pub enum Stop {
     Invariant,
     /// A device or its driver failed.
     Device,
-}
-
-/// An application-driven program execution from its initial State onward.
-///
-/// A session coordinates the supplier and runtime without evaluating the
-/// language. Only the runtime writes State.
-///
-/// Gap: this interface is provisional. Run initialization, parameters,
-/// publication requests and offers, result delivery and stopping conditions
-/// are unspecified. `advance` gives an update count without defining
-/// execution policy or selection among update blocks. `observe` does not
-/// identify the State and Params associated with its results. Both methods
-/// return `Stop`, although refusal or compilation failure need not terminate
-/// a run and has no separate result type yet.
-pub trait Session {
-    /// A value retained by the runtime, with its shape values, after its
-    /// producing stages complete. Byte readback is a separate, explicit
-    /// operation.
-    type Value;
-
-    /// Complete the requested number of updates and return the resulting
-    /// version.
-    ///
-    /// A handshake is a blocking round trip that completes and accepts one
-    /// update before starting the next. Requesting several updates together
-    /// allows the runtime to avoid a handshake for each update.
-    fn advance(&mut self, updates: u64) -> Result<Version, Stop>;
-
-    fn observe(&mut self, nodes: &[Node]) -> Result<Vec<(Node, Self::Value)>, Stop>;
 }
 
 // Well-formedness checks and all other implementations.
