@@ -1280,6 +1280,9 @@ impl Unit {
                     if !produced[at] {
                         return Err(late(*field));
                     }
+                    if !stage.uses.contains(field) {
+                        return Err(Defect::ExtentUnused(index));
+                    }
                 }
             }
             for slot in &stage.reads {

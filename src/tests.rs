@@ -593,6 +593,10 @@ mod unit {
         // A stage determines the domain; a later stage is launched over it.
         let measure = stage(&[], &[], &[0]);
         let fill = over(stage(&[0], &[0], &[]), at(0));
+        // The stage's code finds its extent in the frame only if it uses it.
+        let blind = over(stage(&[], &[], &[]), at(0));
+        let unit = one_result(at(0), at(0), vec![stage(&[], &[], &[0]), blind]);
+        assert_eq!(unit.check().defect(), Some(Defect::ExtentUnused(1)));
         let checked = one_result(at(0), at(0), vec![measure.clone(), fill.clone()])
             .check()
             .expect("a well-formed unit");

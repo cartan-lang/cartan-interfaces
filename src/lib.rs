@@ -767,7 +767,12 @@ pub struct Selection {
 /// the runtime holds before the launch. A stage with an extent computes each
 /// site of it independently: at one site it reads nothing the stage writes at
 /// another. A target may therefore visit the sites in any order or all at
-/// once. When the extent counts no sites the stage is not launched.
+/// once. When the extent counts no sites the stage is not launched. An
+/// extent that is not fixed is among the stage's `uses`, so the code finds
+/// it in its frame.
+///
+/// A runtime that submits stages without waiting keeps the contents of a
+/// region until every submitted stage that reads or writes it has completed.
 ///
 /// Slots and shape values are passed through a [`Frame`]. [`Code::Wasm`] and
 /// [`Code::Metal`] state how a stage is called and how its extent is visited.
@@ -788,6 +793,7 @@ pub struct Stage {
     pub determines: Vec<ShapeRef>,
     /// What the stage is launched over: a domain or a length. `None` is one
     /// launch with no sites, as for a stage that only determines shape values.
+    /// A shape value named here is also among `uses`.
     pub extent: Option<ShapeEntry>,
 }
 
@@ -886,7 +892,8 @@ pub enum Code {
     /// arguments are buffers: buffer 0 holds the stage's [`Frame`] as 64-bit
     /// little-endian words, and buffer `1 + k` is the memory
     /// `Memory::Device(k)`. Each region word is the region's byte offset in
-    /// its memory's buffer. All unit slots use `Memory::Device`.
+    /// its memory's buffer. All unit slots use `Memory::Device`. The frame
+    /// is a buffer of its own for each launch, and the kernel may write it.
     ///
     /// A stage with an extent is dispatched over a grid with one thread for
     /// each site. A thread's position along the grid's first dimension is its
@@ -894,7 +901,8 @@ pub enum Code {
     /// is the axis before that, and the third the axis before that. A thread
     /// whose position lies outside the extent does nothing, so a runtime may
     /// round the grid up. A stage with no extent is dispatched with one
-    /// thread.
+    /// thread. How threads are grouped is the runtime's choice, and a kernel
+    /// does not depend on it.
     ///
     /// A stage that determines shape values writes them into its frame, where
     /// the runtime reads them once the stage has completed. Scalars are those
@@ -948,6 +956,9 @@ pub enum Defect {
     AliasOfNonInput(Slot),
     /// A stage's extent is neither a domain nor a length.
     ExtentNotACount(u32),
+    /// A stage is launched over a shape value it does not list among its
+    /// uses, so its code could not find the extent in its frame.
+    ExtentUnused(u32),
     /// A stage writes a slot it does not own.
     WritesShared {
         stage: u32,
