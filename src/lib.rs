@@ -1078,8 +1078,9 @@ pub trait Supplier {
     fn unit(&self, demands: &[Demand], target: Target) -> Result<Emitted, Self::Diagnostic>;
 
     /// A diagnostic as structured data, for an application's one formatter.
-    /// A diagnostic is never identified or parsed by its text.
-    fn describe(&self, diagnostic: &Self::Diagnostic) -> Report;
+    /// A diagnostic is never identified or parsed by its text. It needs no
+    /// supplier, so a document that was refused can still be described.
+    fn describe(diagnostic: &Self::Diagnostic) -> Report;
 
     /// The inspection commands this supplier offers.
     fn inspections(&self) -> Vec<Inspection> {

@@ -345,6 +345,92 @@ impl Scalar {
     }
 }
 
+impl Kinds {
+    /// A kind written as a document would write it.
+    pub fn notation(&self, kind: KindRef) -> String {
+        match self.get(kind) {
+            Some(Kind::Fiber(fiber)) => self.fiber_notation(*fiber),
+            Some(Kind::Array { element, axes }) => {
+                let element = self.fiber_notation(*element);
+                if axes.iter().all(|axis| *axis == AxisKind::Closed) {
+                    format!("Array<{element}, {}>", axes.len())
+                } else {
+                    let axes: Vec<&str> = axes.iter().map(|axis| axis.notation()).collect();
+                    format!("Array<{element}, [{}]>", axes.join(", "))
+                }
+            }
+            Some(Kind::Optional(inner)) => format!("{}|None", self.notation(*inner)),
+            Some(Kind::Struct(members)) => {
+                let members: Vec<String> = members
+                    .iter()
+                    .map(|(name, kind)| format!("{name}: {}", self.notation(*kind)))
+                    .collect();
+                format!("{{{}}}", members.join(", "))
+            }
+            Some(Kind::Tuple(positions)) => {
+                let positions: Vec<String> =
+                    positions.iter().map(|kind| self.notation(*kind)).collect();
+                format!("({})", positions.join(", "))
+            }
+            None => "?".to_string(),
+        }
+    }
+
+    /// A fiber written as a document would write it.
+    pub fn fiber_notation(&self, fiber: FiberRef) -> String {
+        let field = |field: &Field| match field {
+            Field::Real => "Real",
+            Field::Rational => "Rational",
+            Field::Complex => "Complex",
+        };
+        match self.get_fiber(fiber) {
+            Some(Fiber::Bool) => "Bool".to_string(),
+            Some(Fiber::Int) => "Int".to_string(),
+            Some(Fiber::Real) => "Real".to_string(),
+            Some(Fiber::Rational) => "Rational".to_string(),
+            Some(Fiber::Complex) => "Complex".to_string(),
+            Some(Fiber::Color) => "Color".to_string(),
+            Some(Fiber::Vector { over, count }) => format!("Vector<{}, {count}>", field(over)),
+            Some(Fiber::SO2) => "SO2".to_string(),
+            Some(Fiber::SO3) => "SO3".to_string(),
+            Some(Fiber::Mat { rows, columns }) => format!("Mat<{rows}, {columns}>"),
+            Some(Fiber::Form { degree, dimension }) => format!("Form<{degree}, {dimension}>"),
+            Some(Fiber::Metric { dimension }) => format!("Metric<{dimension}>"),
+            Some(Fiber::Product(members)) => {
+                let members: Vec<String> = members
+                    .iter()
+                    .map(|(name, fiber)| format!("{name}: {}", self.fiber_notation(*fiber)))
+                    .collect();
+                format!("({})", members.join(", "))
+            }
+            Some(Fiber::Sum(variants)) => {
+                let variants: Vec<String> = variants
+                    .iter()
+                    .map(|(name, payload)| match payload {
+                        Some(fiber) => format!("{name}({})", self.fiber_notation(*fiber)),
+                        None => name.clone(),
+                    })
+                    .collect();
+                variants.join(" | ")
+            }
+            None => "?".to_string(),
+        }
+    }
+}
+
+impl AxisKind {
+    /// The axis form written as a document would write it.
+    pub fn notation(self) -> &'static str {
+        match self {
+            AxisKind::Closed => "0..n",
+            AxisKind::OpenBelow => "..n",
+            AxisKind::OpenAbove => "0..",
+            AxisKind::Open => "..",
+            AxisKind::Periodic => "..0..n",
+        }
+    }
+}
+
 impl Layouts {
     /// Return the layout's reference, adding a definition only if none
     /// exists.

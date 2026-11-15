@@ -719,6 +719,21 @@ mod unit {
     }
 
     #[test]
+    fn a_kind_is_written_as_a_document_writes_it() {
+        let mut kinds = Kinds::default();
+        let real = kinds.fiber(Fiber::Real);
+        let members = vec![("rho".to_string(), real), ("mom".to_string(), real)];
+        let element = kinds.fiber(Fiber::Product(members));
+        let array = kinds.define(Kind::Array {
+            element,
+            axes: vec![AxisKind::Closed, AxisKind::Closed],
+        });
+        let optional = kinds.define(Kind::Optional(array));
+        let written = "Array<(rho: Real, mom: Real), 2>|None";
+        assert_eq!(kinds.notation(optional), written);
+    }
+
+    #[test]
     fn a_table_may_hold_layouts_the_unit_does_not_use() {
         // One slot, and a table that also holds a three-plane layout for
         // some other unit of the same program.
