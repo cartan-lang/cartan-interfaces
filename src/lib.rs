@@ -885,13 +885,55 @@ pub struct Frame {
 }
 
 /// Target code as text or bytes, prepared and loaded on the runtime side.
+///
+/// The native 32-bit mathematical functions are `exp` (the exponential),
+/// `log` (the natural logarithm), and `sin` and `cos` (angles in radians).
+/// Arguments and results are IEEE 754 binary32 values. These functions do
+/// not trap and have no observable side effects. Their exceptional results
+/// are required on every target:
+///
+/// | Function | Argument | Result |
+/// | --- | --- | --- |
+/// | All four | NaN | NaN; sign and payload unspecified |
+/// | `exp` | Either signed zero | Exactly 1 |
+/// | `exp` | Positive infinity | Positive infinity |
+/// | `exp` | Negative infinity | Positive zero |
+/// | `log` | Either signed zero | Negative infinity |
+/// | `log` | Positive infinity | Positive infinity |
+/// | `log` | Negative normal value or negative infinity | NaN |
+/// | `sin` | Either signed zero | The same signed zero |
+/// | `cos` | Either signed zero | Exactly 1 |
+/// | `sin`, `cos` | Either infinity | NaN |
+///
+/// For a subnormal argument, `exp` and `cos` give exactly 1, and `sin`
+/// preserves the argument bits. Metal's subnormal-input exception makes
+/// `log` of either sign of subnormal give negative infinity. Without that
+/// exception, a WebAssembly binding gives a finite logarithm for a positive
+/// subnormal and NaN for a negative one.
+///
+/// Otherwise accuracy is the target implementation's own, with no uniform
+/// error bound. Underflow and subnormal results are target dependent.
+/// No additional agreement is required across runs, machines, versions or
+/// targets.
+///
+/// Each binding is selected once for a run and must be pure: the same
+/// argument bits produce the same result bits every time within that run.
+/// Reusing computed values and remeasuring shapes depend on this obligation.
+/// A platform whose
+/// implementation cannot meet it does not conform.
 pub enum Code {
     /// A binary WebAssembly module.
     ///
-    /// The module imports only `env.memory`, a linear memory owned and grown
-    /// by the runtime, and has no start function. It therefore cannot call
-    /// external functions. It may define functions it does not export. All
-    /// unit slots use `Memory::Linear`.
+    /// The module imports `env.memory`, a linear memory owned and grown by
+    /// the runtime. Its only other permitted imports are the functions
+    /// `exp_f32`, `log_f32`, `sin_f32` and `cos_f32` from module `cartan.math`,
+    /// with the mathematical meanings stated above. Each has exactly the
+    /// signature `(f32) -> f32`. Any subset may appear, in any import order,
+    /// including relative to memory. Preparation rejects an unknown import
+    /// or a mismatching signature as invalid code, before any stage runs.
+    ///
+    /// The module has no start function. It may define functions it does
+    /// not export. All unit slots use `Memory::Linear`.
     ///
     /// Each stage is exported under its entry-point name as a function taking
     /// one 32-bit integer and returning nothing. The argument is the byte
@@ -909,7 +951,10 @@ pub enum Code {
     /// visit would have to be stated apart from it.
     Wasm(Vec<u8>),
     /// Metal Shading Language source, compiled by the runtime with fast
-    /// math disabled, so that each operation is done as written.
+    /// math disabled, so that each operation is done as written. Its native
+    /// `exp`, `log`, `sin` and `cos` follow the mathematical meanings and
+    /// within-run purity obligation stated above; disabling fast math does
+    /// not establish an accuracy bound for them.
     ///
     /// Each stage is a kernel function named by its entry point. Its
     /// arguments are buffers: buffer 0 holds the stage's [`Frame`] as 64-bit
