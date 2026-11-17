@@ -853,6 +853,14 @@ mod unit {
         let optional = kinds.define(Kind::Optional(array));
         let written = "Array<(rho: Real, mom: Real), 2>|None";
         assert_eq!(kinds.notation(optional), written);
+        let int = kinds.fiber(Fiber::Int);
+        let int = kinds.define(Kind::Fiber(int));
+        let tuple = kinds.define(Kind::Tuple(vec![int, optional]));
+        let nested = kinds.define(Kind::Tuple(vec![tuple, int]));
+        assert_eq!(
+            kinds.notation(nested),
+            "[[Int, Array<(rho: Real, mom: Real), 2>|None], Int]"
+        );
     }
 
     #[test]

@@ -370,7 +370,7 @@ impl Kinds {
             Some(Kind::Tuple(positions)) => {
                 let positions: Vec<String> =
                     positions.iter().map(|kind| self.notation(*kind)).collect();
-                format!("({})", positions.join(", "))
+                format!("[{}]", positions.join(", "))
             }
             None => "?".to_string(),
         }
