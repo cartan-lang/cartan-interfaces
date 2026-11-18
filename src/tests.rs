@@ -1231,3 +1231,168 @@ mod unit {
         assert_eq!(frame.words, 8);
     }
 }
+
+mod host {
+    use crate::*;
+
+    fn template() -> (Unit, HostCode) {
+        let mut kinds = Kinds::default();
+        let kind = kinds.define(Kind::String);
+        let mut layouts = Layouts::default();
+        let layout = layouts.define(Layout::Utf8);
+        let length = ShapeEntry::Runtime(ShapeRef(0));
+        let unit = Unit {
+            kinds,
+            layouts,
+            outputs: vec![OutputPort {
+                demand: Demand::Value(Node::Derived(DerivedId(0))),
+                kind,
+                layout,
+                shape: vec![length.clone()],
+                planes: vec![Slot(0)],
+            }],
+            storage: vec![Storage::Output(Need {
+                memory: Memory::Host,
+                element_bytes: 1,
+                align: 1,
+                capacity: Capacity(vec![length.clone()]),
+            })],
+            shape_fields: vec![ShapeField::EncodedLength],
+            stages: vec![
+                Stage {
+                    entry: "measure".into(),
+                    determines: vec![ShapeRef(0)],
+                    ..Stage::default()
+                },
+                Stage {
+                    entry: "fill".into(),
+                    writes: vec![Slot(0)],
+                    uses: vec![ShapeRef(0)],
+                    ..Stage::default()
+                },
+            ],
+            ..Unit::default()
+        };
+        let code = HostCode {
+            text: vec![
+                TextOp::Literal("v=".into()),
+                TextOp::Format {
+                    value: TextScalar::Real32(0.1f32.to_bits()),
+                    format: TextFormat::default(),
+                },
+                TextOp::Concat(vec![TextRef(0), TextRef(1), TextRef(0)]),
+            ],
+            stages: vec![
+                HostStage::Measure {
+                    text: TextRef(2),
+                    output: ShapeRef(0),
+                },
+                HostStage::Fill {
+                    text: TextRef(2),
+                    output: Slot(0),
+                    length,
+                },
+            ],
+        };
+        (unit, code)
+    }
+
+    #[test]
+    fn native_text_agrees_with_storage_and_shape_before_execution() {
+        let (unit, code) = template();
+        assert_eq!(unit.kinds.notation(KindRef(0)), "String");
+        assert_eq!(
+            unit.kinds.shape_fields(KindRef(0)),
+            [ShapeField::EncodedLength]
+        );
+        assert_eq!(unit.layouts.measure(1).unwrap().spans, [vec![(0, 1)]]);
+        let checked = unit.check().unwrap();
+        assert_eq!(code.check(&checked), Ok(()));
+        let mut mismatched = code.clone();
+        let HostStage::Fill { text, .. } = &mut mismatched.stages[1] else {
+            unreachable!()
+        };
+        *text = TextRef(0);
+        assert_eq!(
+            mismatched.check(&checked),
+            Err(HostDefect::Stage { index: 1 })
+        );
+        let mut forward = code.clone();
+        forward.text[0] = TextOp::Concat(vec![TextRef(1)]);
+        assert_eq!(
+            forward.check(&checked),
+            Err(HostDefect::TextReference {
+                at: TextRef(0),
+                names: TextRef(1)
+            })
+        );
+        let mut precision = code.clone();
+        precision.text[1] = TextOp::Format {
+            value: TextScalar::Int(1),
+            format: TextFormat {
+                digits: Some(18),
+                ..TextFormat::default()
+            },
+        };
+        assert_eq!(
+            precision.check(&checked),
+            Err(HostDefect::Format { at: TextRef(1) })
+        );
+    }
+
+    #[test]
+    fn host_literals_and_every_shared_output_fit_the_same_capacity() {
+        let (mut unit, mut code) = template();
+        let fixed = ShapeEntry::Fixed(ShapeValue::EncodedLength(2));
+        unit.shape_fields.clear();
+        unit.stages.remove(0);
+        unit.stages[0].uses.clear();
+        unit.outputs[0].shape = vec![fixed.clone()];
+        let Storage::Output(need) = &mut unit.storage[0] else {
+            unreachable!()
+        };
+        need.capacity = Capacity(vec![fixed.clone()]);
+        code.text = vec![TextOp::Literal("é".into())];
+        code.stages = vec![HostStage::Fill {
+            text: TextRef(0),
+            output: Slot(0),
+            length: fixed,
+        }];
+        assert_eq!(code.check(&unit.clone().check().unwrap()), Ok(()));
+        let mut extra = unit.outputs[0].clone();
+        extra.demand = Demand::Value(Node::Derived(DerivedId(1)));
+        extra.shape = vec![ShapeEntry::Fixed(ShapeValue::EncodedLength(100))];
+        unit.outputs.push(extra);
+        assert_eq!(
+            code.check(&unit.clone().check().unwrap()),
+            Err(HostDefect::Output { index: 1 })
+        );
+        unit.outputs.pop();
+        code.text[0] = TextOp::Literal("longer".into());
+        assert_eq!(
+            code.check(&unit.clone().check().unwrap()),
+            Err(HostDefect::Stage { index: 0 })
+        );
+        code.text[0] = TextOp::Literal("é".into());
+        unit.outputs[0].demand = Demand::Initial(StateId(0));
+        assert_eq!(
+            code.check(&unit.check().unwrap()),
+            Err(HostDefect::Output { index: 0 })
+        );
+    }
+
+    #[test]
+    fn encoded_text_extent_is_distinct_from_list_length_and_dispatch() {
+        assert_eq!(ShapeValue::EncodedLength(0).count(), Some(0));
+        assert!(!ShapeValue::EncodedLength(3).is(ShapeField::Length));
+        let (mut unit, _) = template();
+        unit.stages[1].extent = Some(ShapeEntry::Runtime(ShapeRef(0)));
+        assert!(matches!(
+            unit.check(),
+            Err(Refusal::Defect(Defect::ExtentNotACount(1)))
+        ));
+        let (mut unit, _) = template();
+        unit.outputs[0].shape = vec![ShapeEntry::Fixed(ShapeValue::Length(3))];
+        assert!(unit.check().is_err());
+    }
+}

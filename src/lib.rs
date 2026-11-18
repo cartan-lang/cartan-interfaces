@@ -48,7 +48,7 @@
 // Functions are resolved during analysis and are not values that cross these
 // boundaries.
 //
-// Gap: Lists, Maps, Strings, the unit kind `None`, ranges, boxes and views
+// Gap: Lists, Maps, the unit kind `None`, ranges, boxes and views
 // are not yet represented.
 
 /// A scalar category independent of representation width.
@@ -84,8 +84,8 @@ pub enum AxisKind {
 /// as a fixed value or a reference into its shape table.
 ///
 /// A kind fixes structural properties, including Array axis forms, at compile
-/// time. Shape fields describe axis origins and extents, List lengths and
-/// Optional presence.
+/// time. Shape fields describe axis origins and extents, List lengths, String
+/// encoded lengths and Optional presence.
 ///
 /// Presence is a shape field but does not count elements. An absent value is
 /// distinct from an empty value: it owns no storage, and its lengths and
@@ -97,6 +97,8 @@ pub enum ShapeField {
     Presence,
     /// The number of elements in a List.
     Length,
+    /// The number of UTF-8 code units in a String, not a character count.
+    EncodedLength,
     /// The domain of an Array: an origin and an extent for each axis.
     Domain { rank: usize },
 }
@@ -190,6 +192,8 @@ pub struct KindRef(pub u32);
 /// Tuple and a Vector.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
+    /// Decoded Unicode text, distinct from a fiber or a collection of scalars.
+    String,
     /// A single fiber value.
     Fiber(FiberRef),
     /// One fiber at each site of a domain. The kind specifies the number and
@@ -297,6 +301,10 @@ pub struct Part {
 /// count and ordered shape fields are derived from those constituents.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Layout {
+    /// UTF-8 text in one plane of one-byte code units, without a terminator.
+    /// Its sole shape field is the encoded length. Published content is valid
+    /// UTF-8; this does not prescribe the spelling of a String literal.
+    Utf8,
     /// One scalar, at the start of an element of one plane.
     Scalar(Scalar),
     /// Parts in kind order. Parts sharing a plane occupy different byte
@@ -504,8 +512,8 @@ pub struct Axis {
     pub extent: u64,
 }
 
-/// A value's runtime shape information: List length, Array domain or Optional
-/// presence.
+/// A value's runtime shape information: List length, Array domain, String
+/// encoded length or Optional presence.
 ///
 /// Shape describes element counts, locations or presence, independently of
 /// byte size. Element size is fixed at compile time. A unit never specifies
@@ -515,6 +523,8 @@ pub enum ShapeValue {
     /// Optional presence, distinct from an element count.
     Presence(bool),
     Length(u64),
+    /// UTF-8 code units, independent of allocation capacity and character count.
+    EncodedLength(u64),
     Domain(Vec<Axis>),
 }
 
@@ -777,8 +787,8 @@ pub struct Selection {
 ///
 /// Each slot is passed as a [`Region`].
 ///
-/// Gap: stage placement is unspecified. Code targets one backend, so a stage
-/// whose inputs are all host-available cannot be placed on the host.
+/// A unit supplies either compiled target code or explicit native host code.
+/// Gap: mixing host and compiled stages within one unit is unspecified.
 ///
 /// A stage is launched once, or over an extent: a domain or a length that
 /// the runtime holds before the launch. A stage with an extent computes each
@@ -885,6 +895,114 @@ pub struct Frame {
     pub words: u32,
 }
 
+/// An earlier text operation in a native artifact. Shared operations are stated
+/// once; references never expand them into copied trees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextRef(pub u32);
+
+/// A scalar constant with its execution width retained. Formatting these bits
+/// does not evaluate an authored numerical expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TextScalar {
+    Bool(bool),
+    Int(i32),
+    /// IEEE 754 binary32 bits, including signed zero and nonfinite values.
+    Real32(u32),
+}
+
+/// The decimal notation requested by a text operation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextNotation {
+    #[default]
+    Auto,
+    Fixed,
+    Scientific,
+    Engineering,
+}
+
+/// Validated scalar formatting options. Precision is zero through seventeen
+/// digits after the decimal point, retaining trailing zeros. A Bool admits
+/// only the default options and is written `true` or `false`.
+///
+/// Auto without precision uses exact integer text or shortest-round-trip text
+/// at the Real's actual width, retaining `.0` for an integral Real without an
+/// exponent. Negative zero retains its sign. Nonfinite Reals use `nan`, `inf`
+/// and `-inf`, independently of options.
+///
+/// With precision, Auto uses Fixed for zero or magnitude in [1e-4, 1e6), and
+/// Scientific otherwise. Scientific has a mantissa magnitude in [1, 10),
+/// Engineering in [1, 1000) and an exponent divisible by three. Zero has a
+/// zero mantissa (with its sign retained) and exponent zero. Rounding carry
+/// renormalizes both. Fixed without precision uses four decimal places;
+/// Scientific/Engineering without precision use three mantissa decimal places.
+/// In these explicitly selected forms without precision, trailing zeros trim
+/// to one decimal place. Exponents have no redundant leading zero or plus sign.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct TextFormat {
+    pub notation: TextNotation,
+    pub digits: Option<u8>,
+}
+
+/// A pure native text operation. Operands refer only to earlier operations.
+/// A runtime measures concatenations with checked sums over the shared graph;
+/// filling may visit a reference repeatedly without materializing intermediates.
+/// Empty subtrees require no repeated traversal. No operation allocates output,
+/// fetches dependencies or evaluates numerical arithmetic from a source program.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TextOp {
+    Literal(String),
+    Concat(Vec<TextRef>),
+    Format {
+        value: TextScalar,
+        format: TextFormat,
+    },
+}
+
+/// A native text stage, aligned by index with a unit's stage list. Every stage
+/// runs once with no dispatch extent, storage reads or implicit inputs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostStage {
+    /// Measure UTF-8 code units and produce one encoded-length shape value.
+    Measure { text: TextRef, output: ShapeRef },
+    /// Fill exactly the encoded length in the declared Host output slot.
+    /// A fixed length is permitted only for a Literal and equals its UTF-8
+    /// byte length. Other operations use a measured length produced earlier.
+    Fill {
+        text: TextRef,
+        output: Slot,
+        length: ShapeEntry,
+    },
+}
+
+/// A native artifact implementing a closed text computation. Several logical
+/// operations and stages may belong to one unit, sharing this one text table.
+/// The runtime uses its ordinary unit cache, value ownership and publication.
+/// Outputs satisfy Derived value demands; String Params and States are outside
+/// this artifact contract.
+///
+/// Encoded-length overflow is Runtime-detected storage shortage ([`Stop::Shortage`]);
+/// no fill or result publication follows it.
+/// Counting and writing use the same formatting semantics, with checked sizes
+/// and bounded output. Temporary text cannot bypass Runtime storage accounting.
+/// Gap: text operands from input ports and other host services are unspecified.
+#[derive(Clone, Debug, Default)]
+pub struct HostCode {
+    pub text: Vec<TextOp>,
+    pub stages: Vec<HostStage>,
+}
+
+/// A malformed native artifact, rejected before executing any stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostDefect {
+    TextReference { at: TextRef, names: TextRef },
+    Format { at: TextRef },
+    Inputs,
+    StageCount,
+    Stage { index: u32 },
+    Storage { slot: Slot },
+    Output { index: u32 },
+}
+
 /// Target code as text or bytes, prepared and loaded on the runtime side.
 ///
 /// The native 32-bit mathematical functions are `exp` (the exponential),
@@ -923,6 +1041,11 @@ pub struct Frame {
 /// A platform whose
 /// implementation cannot meet it does not conform.
 pub enum Code {
+    /// Native text operations implemented by the runtime. Stages correspond by
+    /// index to the unit stages; entry names are descriptive only. All storage
+    /// is Runtime-provided Host memory. Preparation validates the artifact
+    /// against the checked unit through [`HostCode::check`].
+    Host(HostCode),
     /// A binary WebAssembly module.
     ///
     /// The module imports `env.memory`, a linear memory owned and grown by
@@ -1234,7 +1357,9 @@ pub trait Supplier {
 
     fn program(&self) -> &Program;
 
-    /// Compile one unit satisfying all demands for the specified target.
+    /// Supply one unit satisfying all demands. The target governs compiled
+    /// work; explicitly admitted native host operations use [`Code::Host`].
+    /// This choice precedes execution, never follows an execution failure.
     fn unit(&self, demands: &[Demand], target: Target) -> Result<Emitted, Self::Diagnostic>;
 
     /// Resolve one expression in the accepted root source scope, including its

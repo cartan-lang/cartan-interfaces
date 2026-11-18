@@ -60,7 +60,7 @@ impl Kinds {
             Kind::Optional(inner) => vec![*inner],
             Kind::Struct(members) => members.iter().map(|(_, kind)| *kind).collect(),
             Kind::Tuple(positions) => positions.clone(),
-            Kind::Fiber(_) | Kind::Array { .. } => Vec::new(),
+            Kind::String | Kind::Fiber(_) | Kind::Array { .. } => Vec::new(),
         }
     }
 
@@ -186,7 +186,7 @@ impl Kinds {
             };
             let count = match kind {
                 Kind::Fiber(_) => Some(0),
-                Kind::Array { .. } => Some(1),
+                Kind::String | Kind::Array { .. } => Some(1),
                 Kind::Optional(_) => members(&counts).and_then(|inner| inner.checked_add(1)),
                 Kind::Struct(_) | Kind::Tuple(_) => members(&counts),
             };
@@ -218,6 +218,7 @@ impl Kinds {
             return;
         }
         match self.get(kind) {
+            Some(Kind::String) => fields.push(ShapeField::EncodedLength),
             Some(Kind::Array { axes, .. }) => fields.push(ShapeField::Domain { rank: axes.len() }),
             Some(Kind::Optional(inner)) => {
                 fields.push(ShapeField::Presence);
@@ -256,6 +257,7 @@ impl Kinds {
             members.iter().map(|(name, _)| name.clone()).collect()
         };
         let alike = match (mine, yours) {
+            (Kind::String, Kind::String) => true,
             (Kind::Fiber(a), Kind::Fiber(b)) => self.same_fiber(*a, other, *b, known),
             (
                 Kind::Array { element: a, axes },
@@ -349,6 +351,7 @@ impl Kinds {
     /// A kind written as a document would write it.
     pub fn notation(&self, kind: KindRef) -> String {
         match self.get(kind) {
+            Some(Kind::String) => "String".into(),
             Some(Kind::Fiber(fiber)) => self.fiber_notation(*fiber),
             Some(Kind::Array { element, axes }) => {
                 let element = self.fiber_notation(*element);
@@ -464,6 +467,7 @@ impl Layouts {
             return *answer;
         }
         let alike = match (self.get(layout), other.get(theirs)) {
+            (Some(Layout::Utf8), Some(Layout::Utf8)) => true,
             (Some(Layout::Scalar(a)), Some(Layout::Scalar(b))) => a == b,
             (Some(Layout::Group(a)), Some(Layout::Group(b))) => {
                 a.len() == b.len()
@@ -504,7 +508,7 @@ impl Layouts {
 
     fn children(layout: &Layout) -> Vec<LayoutRef> {
         match layout {
-            Layout::Scalar(_) => Vec::new(),
+            Layout::Utf8 | Layout::Scalar(_) => Vec::new(),
             Layout::Group(parts) => parts.iter().map(|part| part.layout).collect(),
             Layout::Repeat { part, .. } => vec![*part],
             Layout::Array(inner) | Layout::Optional(inner) => vec![*inner],
@@ -529,6 +533,7 @@ impl Layouts {
                 }
             }
             let (facts, spans) = match layout {
+                Layout::Utf8 => (1, vec![(0, 1)]),
                 Layout::Scalar(scalar) => (0, vec![(0, scalar.bytes())]),
                 Layout::Group(parts) => self.group(at, parts, &measures, most_planes)?,
                 Layout::Repeat {
@@ -654,6 +659,7 @@ impl Layouts {
             return false;
         };
         let answer = match (how, held.form(kinds)) {
+            (Layout::Utf8, Form::String) => true,
             (Layout::Scalar(scalar), Form::Scalar(primitive)) => scalar.stores(primitive),
             (Layout::Array(element), Form::Array(fiber)) => {
                 self.holds(*element, kinds, Held::Fiber(fiber), known)
@@ -700,6 +706,7 @@ enum Held {
 
 /// The immediate structure required by a kind or fiber.
 enum Form {
+    String,
     Scalar(Primitive),
     /// Parts in order.
     Each(Vec<Held>),
@@ -739,6 +746,7 @@ impl Held {
                 _ => Form::Unknown,
             },
             Held::Kind(kind) => match kinds.get(kind) {
+                Some(Kind::String) => Form::String,
                 Some(Kind::Fiber(fiber)) => Held::Fiber(*fiber).form(kinds),
                 Some(Kind::Array { element, .. }) => Form::Array(*element),
                 Some(Kind::Optional(inner)) => Form::Optional(*inner),
@@ -810,7 +818,7 @@ impl ShapeValue {
     pub fn count(&self) -> Option<u64> {
         match self {
             ShapeValue::Presence(_) => None,
-            ShapeValue::Length(length) => Some(*length),
+            ShapeValue::Length(length) | ShapeValue::EncodedLength(length) => Some(*length),
             ShapeValue::Domain(axes) if axes.iter().any(|axis| axis.extent == 0) => Some(0),
             ShapeValue::Domain(axes) => axes
                 .iter()
@@ -834,6 +842,7 @@ impl ShapeValue {
         match (self, field) {
             (ShapeValue::Presence(_), ShapeField::Presence) => true,
             (ShapeValue::Length(_), ShapeField::Length) => true,
+            (ShapeValue::EncodedLength(_), ShapeField::EncodedLength) => true,
             (ShapeValue::Domain(axes), ShapeField::Domain { rank }) => axes.len() == rank,
             _ => false,
         }
@@ -955,7 +964,7 @@ impl Governed<'_> {
                 self.walk(*inner, plane, fact + 1, enclosing, absent)?;
                 enclosing.pop();
             }
-            Some(Layout::Array(_)) => {
+            Some(Layout::Array(_) | Layout::Utf8) => {
                 enclosing.push(fact);
                 self.place(plane, planes, enclosing, absent)?;
                 enclosing.pop();
@@ -1008,7 +1017,7 @@ impl ShapeField {
     /// The word count for this shape-field category in a [`Frame`].
     pub fn words(self) -> u32 {
         match self {
-            ShapeField::Presence | ShapeField::Length => 1,
+            ShapeField::Presence | ShapeField::Length | ShapeField::EncodedLength => 1,
             ShapeField::Domain { rank } => 2 * rank as u32,
         }
     }
@@ -1297,13 +1306,16 @@ impl Unit {
             // The runtime holds a stage's extent before it launches it.
             match &stage.extent {
                 None => {}
-                Some(ShapeEntry::Fixed(ShapeValue::Presence(_))) => {
+                Some(ShapeEntry::Fixed(ShapeValue::Presence(_) | ShapeValue::EncodedLength(_))) => {
                     return Err(Defect::ExtentNotACount(index));
                 }
                 Some(ShapeEntry::Fixed(_)) => {}
                 Some(ShapeEntry::Runtime(field)) => {
                     let at = place(field)?;
-                    if self.shape_fields[at] == ShapeField::Presence {
+                    if matches!(
+                        self.shape_fields[at],
+                        ShapeField::Presence | ShapeField::EncodedLength
+                    ) {
                         return Err(Defect::ExtentNotACount(index));
                     }
                     if !produced[at] {
@@ -1374,5 +1386,133 @@ impl Unit {
                 governs,
             })),
         }
+    }
+}
+
+impl HostCode {
+    /// Check native operations and their exact correspondence to a checked unit.
+    /// This checks descriptions, not the results of executing a formatter.
+    pub fn check(&self, checked: &Checked) -> Result<(), HostDefect> {
+        let unit = checked.unit();
+        if !unit.inputs.is_empty() || !unit.selected.is_empty() {
+            return Err(HostDefect::Inputs);
+        }
+        for (index, operation) in self.text.iter().enumerate() {
+            let at = TextRef(index as u32);
+            match operation {
+                TextOp::Literal(_) => {}
+                TextOp::Concat(parts) => {
+                    for names in parts {
+                        if names.0 as usize >= index {
+                            return Err(HostDefect::TextReference { at, names: *names });
+                        }
+                    }
+                }
+                TextOp::Format { value, format } => {
+                    if format.digits.is_some_and(|digits| digits > 17)
+                        || matches!(value, TextScalar::Bool(_)) && *format != TextFormat::default()
+                    {
+                        return Err(HostDefect::Format { at });
+                    }
+                }
+            }
+        }
+        for (index, storage) in unit.storage.iter().enumerate() {
+            let slot = Slot(index as u32);
+            let Storage::Output(need) = storage else {
+                return Err(HostDefect::Storage { slot });
+            };
+            if need.memory != Memory::Host || need.element_bytes != 1 || need.align != 1 {
+                return Err(HostDefect::Storage { slot });
+            }
+        }
+        for (index, port) in unit.outputs.iter().enumerate() {
+            if !matches!(port.demand, Demand::Value(Node::Derived(_)))
+                || !matches!(unit.kinds.get(port.kind), Some(Kind::String))
+                || !matches!(unit.layouts.get(port.layout), Some(Layout::Utf8))
+                || port.planes.len() != 1
+                || port.shape.len() != 1
+            {
+                return Err(HostDefect::Output {
+                    index: index as u32,
+                });
+            }
+            let Some(Storage::Output(need)) = unit.storage.get(port.planes[0].0 as usize) else {
+                return Err(HostDefect::Output {
+                    index: index as u32,
+                });
+            };
+            if need.capacity.0 != port.shape {
+                return Err(HostDefect::Output {
+                    index: index as u32,
+                });
+            }
+        }
+        if self.stages.len() != unit.stages.len() {
+            return Err(HostDefect::StageCount);
+        }
+        let mut measurements = HashMap::new();
+        let mut filled = HashSet::new();
+        for (index, (operation, stage)) in self.stages.iter().zip(&unit.stages).enumerate() {
+            let defect = HostDefect::Stage {
+                index: index as u32,
+            };
+            if !stage.reads.is_empty() || stage.extent.is_some() {
+                return Err(defect);
+            }
+            let (text, valid) = match operation {
+                HostStage::Measure { text, output } => {
+                    let valid = unit.shape_fields.get(output.0 as usize)
+                        == Some(&ShapeField::EncodedLength)
+                        && stage.writes.is_empty()
+                        && stage.uses.is_empty()
+                        && stage.determines == [*output];
+                    measurements.insert(output.0, *text);
+                    (*text, valid)
+                }
+                HostStage::Fill {
+                    text,
+                    output,
+                    length,
+                } => {
+                    let uses = match length {
+                        ShapeEntry::Fixed(ShapeValue::EncodedLength(length)) if matches!(self.text.get(text.0 as usize), Some(TextOp::Literal(value)) if value.len() as u64 == *length) => {
+                            Vec::new()
+                        }
+                        ShapeEntry::Runtime(reference)
+                            if measurements.get(&reference.0) == Some(text) =>
+                        {
+                            vec![*reference]
+                        }
+                        _ => return Err(defect),
+                    };
+                    let Some(Storage::Output(need)) = unit.storage.get(output.0 as usize) else {
+                        return Err(defect);
+                    };
+                    let result = unit
+                        .outputs
+                        .iter()
+                        .any(|port| port.planes == [*output] && port.shape == [length.clone()]);
+                    let valid = stage.writes == [*output]
+                        && stage.uses == uses
+                        && stage.determines.is_empty()
+                        && need.capacity.0 == [length.clone()]
+                        && result
+                        && filled.insert(output.0);
+                    (*text, valid)
+                }
+            };
+            if !valid || text.0 as usize >= self.text.len() {
+                return Err(defect);
+            }
+        }
+        for (index, _) in unit.storage.iter().enumerate() {
+            if !filled.contains(&(index as u32)) {
+                return Err(HostDefect::Storage {
+                    slot: Slot(index as u32),
+                });
+            }
+        }
+        Ok(())
     }
 }
