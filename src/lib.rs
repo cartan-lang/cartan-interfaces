@@ -977,8 +977,9 @@ pub enum HostStage {
 /// A native artifact implementing a closed text computation. Several logical
 /// operations and stages may belong to one unit, sharing this one text table.
 /// The runtime uses its ordinary unit cache, value ownership and publication.
-/// Outputs satisfy Derived value demands; String Params and States are outside
-/// this artifact contract.
+/// Outputs satisfy distinct Derived value demands; one computation identity
+/// cannot have two result ports. Distinct demands may share unchanged result
+/// storage and shape. String Params and States are outside this artifact contract.
 ///
 /// Encoded-length overflow is Runtime-detected storage shortage ([`Stop::Shortage`]);
 /// no fill or result publication follows it.

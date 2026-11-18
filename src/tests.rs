@@ -1361,6 +1361,9 @@ mod host {
         assert_eq!(code.check(&unit.clone().check().unwrap()), Ok(()));
         let mut extra = unit.outputs[0].clone();
         extra.demand = Demand::Value(Node::Derived(DerivedId(1)));
+        unit.outputs.push(extra.clone());
+        assert_eq!(code.check(&unit.clone().check().unwrap()), Ok(()));
+        unit.outputs.pop();
         extra.shape = vec![ShapeEntry::Fixed(ShapeValue::EncodedLength(100))];
         unit.outputs.push(extra);
         assert_eq!(
@@ -1379,6 +1382,51 @@ mod host {
             code.check(&unit.check().unwrap()),
             Err(HostDefect::Output { index: 0 })
         );
+    }
+
+    #[test]
+    fn a_native_unit_cannot_assign_two_values_to_one_demand() {
+        let (mut unit, mut code) = template();
+        let fixed = ShapeEntry::Fixed(ShapeValue::EncodedLength(1));
+        unit.shape_fields.clear();
+        unit.stages = vec![
+            Stage {
+                writes: vec![Slot(0)],
+                ..Stage::default()
+            },
+            Stage {
+                writes: vec![Slot(1)],
+                ..Stage::default()
+            },
+        ];
+        unit.outputs[0].shape = vec![fixed.clone()];
+        let mut second = unit.outputs[0].clone();
+        second.planes = vec![Slot(1)];
+        unit.outputs.push(second);
+        let Storage::Output(need) = &mut unit.storage[0] else {
+            unreachable!()
+        };
+        need.capacity = Capacity(vec![fixed.clone()]);
+        unit.storage.push(unit.storage[0].clone());
+        code.text = vec![TextOp::Literal("A".into()), TextOp::Literal("B".into())];
+        code.stages = vec![
+            HostStage::Fill {
+                text: TextRef(0),
+                output: Slot(0),
+                length: fixed.clone(),
+            },
+            HostStage::Fill {
+                text: TextRef(1),
+                output: Slot(1),
+                length: fixed,
+            },
+        ];
+        assert_eq!(
+            code.check(&unit.clone().check().unwrap()),
+            Err(HostDefect::Output { index: 1 })
+        );
+        unit.outputs[1].demand = Demand::Value(Node::Derived(DerivedId(1)));
+        assert_eq!(code.check(&unit.check().unwrap()), Ok(()));
     }
 
     #[test]

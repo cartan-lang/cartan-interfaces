@@ -2,7 +2,7 @@
 //! validation.
 
 use super::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 // Kinds: logical value structure
 
@@ -1426,8 +1426,10 @@ impl HostCode {
                 return Err(HostDefect::Storage { slot });
             }
         }
+        let mut demands = BTreeSet::new();
         for (index, port) in unit.outputs.iter().enumerate() {
-            if !matches!(port.demand, Demand::Value(Node::Derived(_)))
+            if !demands.insert(port.demand)
+                || !matches!(port.demand, Demand::Value(Node::Derived(_)))
                 || !matches!(unit.kinds.get(port.kind), Some(Kind::String))
                 || !matches!(unit.layouts.get(port.layout), Some(Layout::Utf8))
                 || port.planes.len() != 1
