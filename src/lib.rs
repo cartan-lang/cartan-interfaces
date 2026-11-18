@@ -393,8 +393,9 @@ pub struct ParamId(pub u32);
 /// regardless of source names, including unnamed computations.
 ///
 /// Gap: analysis determines computational identity, but its criteria are
-/// unspecified here. Identity is valid within one analyzed program; stability
-/// across source changes is unresolved.
+/// unspecified here. Identity is valid within one analyzed program and remains
+/// stable through successful expression registration. Independently analyzed
+/// source revisions need not preserve it; queries must be resolved again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DerivedId(pub u32);
 
@@ -483,7 +484,7 @@ pub struct Update {
 /// requests.
 #[derive(Clone, Debug, Default)]
 pub struct Program {
-    /// Unique kind definitions used by declared nodes.
+    /// Unique kind definitions used by declarations and registered expressions.
     pub kinds: Kinds,
     pub declared: Vec<Declared>,
     /// Update blocks in source order, which does not prescribe execution
@@ -1175,6 +1176,24 @@ pub struct Emitted {
     pub code: Code,
 }
 
+/// A registered expression in the supplier's accepted program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Expression {
+    /// The ordinary value demand for this expression.
+    pub node: Node,
+    /// A reference into the current [`Program::kinds`].
+    pub kind: KindRef,
+}
+
+/// Why expression registration did not extend the accepted program.
+#[derive(Debug)]
+pub enum ExpressionError<D> {
+    /// This supplier does not provide expression registration.
+    Unsupported,
+    /// The expression was refused, with its retained source diagnostic.
+    Refused(D),
+}
+
 /// The compiler interface consumed by the runtime.
 ///
 /// The runtime requires no syntax tree, semantic graph or knowledge of code
@@ -1217,6 +1236,36 @@ pub trait Supplier {
 
     /// Compile one unit satisfying all demands for the specified target.
     fn unit(&self, demands: &[Demand], target: Target) -> Result<Emitted, Self::Diagnostic>;
+
+    /// Resolve one expression in the accepted root source scope, including its
+    /// resolved imports, and register its ordinary value demand.
+    ///
+    /// Registration leaves authored declarations, updates and their meanings
+    /// unchanged. It preserves every existing node's identity and meaning,
+    /// including unnamed nodes. New kind definitions may be appended without
+    /// changing existing kind references. Previously supplied units remain
+    /// compatible with retained values and subsequent units for the same run
+    /// and target. An expression denoting an existing computation returns the
+    /// same node under the program's computation identity rules.
+    ///
+    /// Success makes the returned node available through [`Supplier::unit`].
+    /// Registration does not execute the expression or select a target;
+    /// target-specific refusals remain ordinary unit-supply failures. Failure
+    /// leaves the accepted program and its previously available demands intact.
+    /// Repeated registrations extend this same program, not independent copies.
+    /// An independently analyzed source revision is a new identity scope.
+    ///
+    /// Diagnostics retain the exact submitted expression as a distinct source,
+    /// source-relative byte spans and any referenced accepted source snapshots.
+    /// They can be described after the input text and supplier are dropped.
+    /// The same source retention applies to later unit-supply diagnostics for
+    /// the registered expression.
+    fn register_expression(
+        &mut self,
+        _text: &str,
+    ) -> Result<Expression, ExpressionError<Self::Diagnostic>> {
+        Err(ExpressionError::Unsupported)
+    }
 
     /// A diagnostic as structured data, for an application's one formatter.
     /// A diagnostic is never identified or parsed by its text. It needs no
