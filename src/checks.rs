@@ -60,7 +60,7 @@ impl Kinds {
             Kind::Optional(inner) => vec![*inner],
             Kind::Struct(members) => members.iter().map(|(_, kind)| *kind).collect(),
             Kind::Tuple(positions) => positions.clone(),
-            Kind::String | Kind::Fiber(_) | Kind::Array { .. } => Vec::new(),
+            Kind::String | Kind::Range(_) | Kind::Fiber(_) | Kind::Array { .. } => Vec::new(),
         }
     }
 
@@ -164,6 +164,7 @@ impl Kinds {
         let mut counts: Vec<Option<u64>> = Vec::with_capacity(self.kinds.len());
         for kind in &self.kinds {
             let count = match kind {
+                Kind::Range(form) => Some(u64::from(form.endpoint_count())),
                 Kind::Fiber(fiber) | Kind::Array { element: fiber, .. } => fibers[fiber.0 as usize],
                 _ => Self::children(kind)
                     .iter()
@@ -185,7 +186,7 @@ impl Kinds {
                     .try_fold(0u64, |sum, kind| sum.checked_add(counts[kind.0 as usize]?))
             };
             let count = match kind {
-                Kind::Fiber(_) => Some(0),
+                Kind::Fiber(_) | Kind::Range(_) => Some(0),
                 Kind::String | Kind::Array { .. } => Some(1),
                 Kind::Optional(_) => members(&counts).and_then(|inner| inner.checked_add(1)),
                 Kind::Struct(_) | Kind::Tuple(_) => members(&counts),
@@ -229,7 +230,7 @@ impl Kinds {
                     self.push_shape_fields(member, counts, fields);
                 }
             }
-            Some(Kind::Fiber(_)) | None => {}
+            Some(Kind::Fiber(_) | Kind::Range(_)) | None => {}
         }
     }
 
@@ -258,6 +259,7 @@ impl Kinds {
         };
         let alike = match (mine, yours) {
             (Kind::String, Kind::String) => true,
+            (Kind::Range(a), Kind::Range(b)) => a == b,
             (Kind::Fiber(a), Kind::Fiber(b)) => self.same_fiber(*a, other, *b, known),
             (
                 Kind::Array { element: a, axes },
@@ -352,6 +354,7 @@ impl Kinds {
     pub fn notation(&self, kind: KindRef) -> String {
         match self.get(kind) {
             Some(Kind::String) => "String".into(),
+            Some(Kind::Range(form)) => format!("Range<{}>", form.notation()),
             Some(Kind::Fiber(fiber)) => self.fiber_notation(*fiber),
             Some(Kind::Array { element, axes }) => {
                 let element = self.fiber_notation(*element);
@@ -422,6 +425,15 @@ impl Kinds {
 }
 
 impl AxisKind {
+    /// The number of finite endpoints in this Range form's payload.
+    pub fn endpoint_count(self) -> u32 {
+        match self {
+            AxisKind::Closed | AxisKind::Periodic => 2,
+            AxisKind::OpenBelow | AxisKind::OpenAbove => 1,
+            AxisKind::Open => 0,
+        }
+    }
+
     /// The axis form written as a document would write it.
     pub fn notation(self) -> &'static str {
         match self {
@@ -660,6 +672,7 @@ impl Layouts {
         };
         let answer = match (how, held.form(kinds)) {
             (Layout::Utf8, Form::String) => true,
+            (Layout::Scalar(Scalar::I64), Form::Endpoint) => true,
             (Layout::Scalar(scalar), Form::Scalar(primitive)) => scalar.stores(primitive),
             (Layout::Array(element), Form::Array(fiber)) => {
                 self.holds(*element, kinds, Held::Fiber(fiber), known)
@@ -702,11 +715,13 @@ enum Held {
     Fiber(FiberRef),
     Field(Field),
     Scalar(Primitive),
+    Endpoint,
 }
 
 /// The immediate structure required by a kind or fiber.
 enum Form {
     String,
+    Endpoint,
     Scalar(Primitive),
     /// Parts in order.
     Each(Vec<Held>),
@@ -723,6 +738,7 @@ impl Held {
         let alike = |primitive, count| Form::Alike(Held::Scalar(primitive), count);
         let fibers = |fibers: Vec<FiberRef>| fibers.into_iter().map(Held::Fiber);
         match self {
+            Held::Endpoint => Form::Endpoint,
             Held::Scalar(primitive) => Form::Scalar(primitive),
             Held::Field(Field::Real) => Form::Scalar(Primitive::Real),
             Held::Field(Field::Rational) => alike(Primitive::Int, 2),
@@ -747,6 +763,7 @@ impl Held {
             },
             Held::Kind(kind) => match kinds.get(kind) {
                 Some(Kind::String) => Form::String,
+                Some(Kind::Range(form)) => Form::Alike(Held::Endpoint, form.endpoint_count()),
                 Some(Kind::Fiber(fiber)) => Held::Fiber(*fiber).form(kinds),
                 Some(Kind::Array { element, .. }) => Form::Array(*element),
                 Some(Kind::Optional(inner)) => Form::Optional(*inner),

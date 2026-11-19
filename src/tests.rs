@@ -181,6 +181,61 @@ mod kind {
 mod layout {
     use crate::*;
 
+    #[test]
+    fn range_forms_keep_endpoint_width_and_compose_as_tuple_members() {
+        let mut kinds = Kinds::default();
+        let mut layouts = Layouts::default();
+        let endpoint = layouts.define(Layout::Scalar(Scalar::I64));
+        let short = layouts.define(Layout::Scalar(Scalar::I32));
+        let mut members = Vec::new();
+        let mut parts = Vec::new();
+        let mut plane = 0;
+        for (form, count) in [
+            (AxisKind::Open, 0),
+            (AxisKind::Closed, 2),
+            (AxisKind::OpenAbove, 1),
+            (AxisKind::OpenBelow, 1),
+            (AxisKind::Periodic, 2),
+        ] {
+            let kind = kinds.define(Kind::Range(form));
+            let group = |layout| (0..count).map(|i| part(layout, i, 0)).collect();
+            let layout = layouts.define(Layout::Group(group(endpoint)));
+            let narrow = layouts.define(Layout::Group(group(short)));
+            assert!(layouts.fits(layout, &kinds, kind));
+            assert_eq!(layouts.fits(narrow, &kinds, kind), count == 0);
+            let wrong_arity = layouts.define(Layout::Group(
+                (0..count + 1).map(|i| part(endpoint, i, 0)).collect(),
+            ));
+            assert!(!layouts.fits(wrong_arity, &kinds, kind));
+            for &earlier in &members {
+                assert!(!kinds.same(kind, &kinds, earlier));
+            }
+            let singleton = kinds.define(Kind::Tuple(vec![kind]));
+            assert!(!kinds.same(kind, &kinds, singleton));
+            assert_eq!(
+                kinds.scalar_counts()[kind.0 as usize],
+                Some(u64::from(count))
+            );
+            assert!(kinds.shape_fields(kind).is_empty());
+            let optional = kinds.define(Kind::Optional(kind));
+            assert_eq!(kinds.shape_fields(optional), vec![ShapeField::Presence]);
+            members.push(kind);
+            parts.push(part(layout, plane, 0));
+            plane += count;
+        }
+        let tuple = kinds.define(Kind::Tuple(members));
+        let layout = layouts.define(Layout::Group(parts));
+        assert_eq!(kinds.check(), Ok(()));
+        assert!(layouts.fits(layout, &kinds, tuple));
+        let measured = layouts.measure(8).unwrap();
+        assert_eq!(measured.facts[layout.0 as usize], 0);
+        assert_eq!(measured.planes[layout.0 as usize], 6);
+        let mut reordered = Kinds::default();
+        let periodic = reordered.define(Kind::Range(AxisKind::Periodic));
+        let expected = kinds.define(Kind::Range(AxisKind::Periodic));
+        assert!(kinds.same(expected, &reordered, periodic));
+    }
+
     fn part(layout: LayoutRef, plane: u32, offset: u32) -> Part {
         Part {
             layout,

@@ -48,7 +48,7 @@
 // Functions are resolved during analysis and are not values that cross these
 // boundaries.
 //
-// Gap: Lists, Maps, the unit kind `None`, ranges, boxes and views
+// Gap: Lists, Maps, the unit kind `None` and views
 // are not yet represented.
 
 /// A scalar category independent of representation width.
@@ -59,8 +59,8 @@ pub enum Primitive {
     Real,
 }
 
-/// The form of an Array axis, as part of the Array's kind. Arrays with
-/// different axis forms have different kinds. Every axis has an explicit
+/// The form of a Range, also the form of an Array axis. Ranges and Arrays with
+/// different forms have different kinds. Every axis has an explicit
 /// form here. A type written in a document with only a rank leaves each form
 /// to be inferred from the values assigned.
 ///
@@ -194,6 +194,36 @@ pub struct KindRef(pub u32);
 pub enum Kind {
     /// Decoded Unicode text, distinct from a fiber or a collection of scalars.
     String,
+    /// A run of integer coordinates with a static form and runtime bounds.
+    /// A box is an ordinary Tuple of Ranges, including at rank one; it has no
+    /// separate kind. A Range is not a fiber and has no shape fields.
+    ///
+    /// The supported physical profile uses signed `I64` endpoint parts in a
+    /// `Layout::Group` or `Layout::Repeat`, ordered as follows:
+    ///
+    /// | Form | Parts |
+    /// | --- | --- |
+    /// | Closed or Periodic | inclusive lower, exclusive upper |
+    /// | OpenAbove | inclusive lower |
+    /// | OpenBelow | exclusive upper |
+    /// | Open | none |
+    ///
+    /// Unbounded ends have no payload or sentinel. A present Open Range is
+    /// distinct from an absent Optional. For bounded forms the upper endpoint
+    /// is at least the lower; crossed construction normalizes to an empty
+    /// Range at its lower endpoint. Periodic empty Ranges are permitted.
+    /// Inclusive source spelling is normalized after widening, without
+    /// overflowing source arithmetic. This profile represents every signed32
+    /// source interval, including its full inclusive span, without enumeration.
+    ///
+    /// The profile does not define source integer width. A producer must report
+    /// an unsupported representation if a normalized endpoint cannot fit I64.
+    /// A consumer must validate supported coordinate bounds before narrowing
+    /// held endpoints. Kind and layout checks cannot inspect payload contents
+    /// and do not authorize wrapping or clamping an unsupported coordinate.
+    /// Array origin/extent descriptors are derived from these endpoints using
+    /// exact, checked arithmetic; a Range's bounds are ordinary payload data.
+    Range(AxisKind),
     /// A single fiber value.
     Fiber(FiberRef),
     /// One fiber at each site of a domain. The kind specifies the number and
@@ -313,7 +343,9 @@ pub enum Layout {
     ///
     /// A group represents Product, Struct and Tuple members in order; a
     /// Rational's numerator and denominator; a Complex value's `re` and `im`;
-    /// or a Color's `r`, `g`, `b` and `a`. A Sum uses an Int tag for the
+    /// or a Color's `r`, `g`, `b` and `a`. A Range uses the ordered I64 endpoints
+    /// specified by its kind, with an empty group for an Open Range.
+    /// A Sum uses an Int tag for the
     /// active variant's position, followed by all variant payloads in
     /// declaration order. Inactive payloads contain zero.
     Group(Vec<Part>),
