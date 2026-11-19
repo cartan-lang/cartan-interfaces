@@ -1,9 +1,9 @@
 # Working in cartan-interfaces
 
-Read README and the crate header in `src/lib.rs` first. The workspace root's
-[AGENTS.md](../AGENTS.md) holds the shared rules: workflow, ownership, HANDOFF,
-design doctrine and escalation, commits and documentation. This file adds only
-what is specific to this repository.
+Read README and the crate header in `src/lib.rs` first. Cartan's
+[AGENTS.md](../cartan/AGENTS.md) holds the workspace's shared rules: workflow,
+ownership, HANDOFF, design doctrine and escalation, commits and documentation.
+This file adds only what is specific to this repository.
 
 ## Scope
 
