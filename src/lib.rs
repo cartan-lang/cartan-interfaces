@@ -902,10 +902,9 @@ pub struct Selection {
 /// A runtime that submits stages without waiting keeps the contents of a
 /// region until every submitted stage that reads or writes it has completed.
 ///
-/// Slots and shape values are passed through a [`Frame`]. [`Code::Wasm`] and
-/// [`Code::Metal`] state how a stage is called and how its extent is visited.
-///
-/// Gap: the calling convention for CUDA is unspecified.
+/// Slots and shape values are passed through a [`Frame`]. [`Code::Wasm`],
+/// [`Code::Metal`] and [`Code::Cuda`] state how a stage is called and how its
+/// extent is visited.
 #[derive(Clone, Debug, Default)]
 pub struct Stage {
     /// The stage's entry-point name.
@@ -1209,6 +1208,52 @@ pub enum Code {
     /// into the later frame. A determined shape value that a later frame
     /// could refer to in place would remove that wait.
     Metal(String),
+    /// CUDA C++ source, in an initial profile. Each stage exports one
+    /// C-linkage kernel under its exact entry name within the prepared unit.
+    /// It returns void and takes two 64-bit device pointers in order. The
+    /// first addresses a launch-private, writable, eight-byte-aligned
+    /// [`Frame`] of little-endian 64-bit words. The second addresses the byte
+    /// arena for the unit-local memory `Memory::Device(0)`. Every storage
+    /// slot belongs to that memory. Region words are unsigned byte offsets
+    /// from the arena base to the assigned region. A live region may start
+    /// at zero. Shape values establish which slots apply, and code may only
+    /// access applicable regions.
+    ///
+    /// When executed, a stage with no extent runs once with exactly one
+    /// thread, including scalar setup, measurement and reductions over empty
+    /// inputs. Only such a stage may determine shapes. Its thread writes the
+    /// determined frame words for consumption after completion. The supplier
+    /// refuses a stage with both an extent and a nonempty `determines` list.
+    /// A stage with an empty extent has no launch. A result satisfied solely
+    /// by selecting or aliasing existing storage requires no kernel or
+    /// allocation of its own.
+    ///
+    /// A nonempty extent is visited in full in one launch. Each site executes
+    /// exactly once. Different sites write disjoint bytes. This profile
+    /// admits lengths and rank-one or rank-two domains. The x dimension
+    /// corresponds to a length or the last domain axis, and y to the first
+    /// axis of a rank-two domain. Unused block and grid dimensions are one.
+    /// Any legal positive physical dimensions on the active axes must cover
+    /// the full logical extent, including a grid smaller than the extent and
+    /// padding outside it. Domain origins are signed 64-bit values. Extents
+    /// and site offsets are unsigned 64-bit values.
+    ///
+    /// The frame, its arena backing, input, output and scratch regions, and
+    /// the prepared module remain valid through completion of every
+    /// submitted use. Rejecting a candidate or requesting cancellation does
+    /// not retire its in-flight uses.
+    ///
+    /// Preparation preserves supplied scalar widths and written operations.
+    /// Binary32 arithmetic uses nearest-even rounding, preserves signed zero,
+    /// infinities and gradual underflow, and performs multiplies and adds
+    /// separately as written. Division and square root are correctly
+    /// rounded. The four native mathematical functions meet the
+    /// exceptional-result and within-run purity rules stated above. For
+    /// CUDA, the logarithm of a positive subnormal is finite and the
+    /// logarithm of a negative subnormal is NaN.
+    ///
+    /// Gap: partial launches with explicit output ownership, higher ranks and
+    /// bindings for regions outside the single arena.
     Cuda(String),
 }
 
