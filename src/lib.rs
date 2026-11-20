@@ -12,13 +12,12 @@
 //! implement [`Supplier`] for the same runtime. What an application asks of
 //! a runtime is not stated either, while both live in one repository.
 //!
-//! Decide: whether the boundary between the shared application and a frontend
-//! belongs here once a frontend in another repository consumes it, under the
-//! rule that every boundary between components is stated here, or whether
-//! that rule is to exempt this surface and leave it in the application's
-//! crate. One concrete second frontend bounds the proposal, and the boundary
-//! is agreed before that frontend depends on it. Neither answer calls for a
-//! new transport between an application and a runtime.
+//! Gap: the boundary between the shared application and a frontend is not
+//! stated yet. It belongs here, under the rule that every boundary between
+//! components is stated here, and is agreed before a frontend in another
+//! repository depends on it. One concrete second frontend bounds the
+//! proposal. It calls for no new transport between an application and a
+//! runtime.
 //!
 //! A code generator describes compiled code as a [`Unit`]: its inputs,
 //! results, storage requirements and stages. The runtime binds inputs,
