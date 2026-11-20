@@ -12,6 +12,14 @@
 //! implement [`Supplier`] for the same runtime. What an application asks of
 //! a runtime is not stated either, while both live in one repository.
 //!
+//! Decide: whether the boundary between the shared application and a frontend
+//! belongs here once a frontend in another repository consumes it, under the
+//! rule that every boundary between components is stated here, or whether
+//! that rule is to exempt this surface and leave it in the application's
+//! crate. One concrete second frontend bounds the proposal, and the boundary
+//! is agreed before that frontend depends on it. Neither answer calls for a
+//! new transport between an application and a runtime.
+//!
 //! A code generator describes compiled code as a [`Unit`]: its inputs,
 //! results, storage requirements and stages. The runtime binds inputs,
 //! provides storage, launches stages and publishes results. Compiled code
@@ -50,6 +58,24 @@
 //
 // Gap: Lists, Maps, the unit kind `None` and views
 // are not yet represented.
+//
+// Decide: how an authored view crosses. Its representation keeps nested
+// layout, text, readouts and graphics as structure, with references that let
+// typed data and substructure be shared. It is not a terminal frame, a DOM
+// tree or a flattened picture. The candidates are a kind of its own with a
+// closed vocabulary of parts, or ordinary structural values under an agreed
+// schema. A view built only by a host defers this representation and does not
+// complete the authored-view goal. Collections of a varying number of children
+// and a view's configuration are capabilities to state as they are needed.
+//
+// Decide: what an authored activation carries and how it is accepted. In the
+// first case it identifies an operation the supplier described, with static
+// write targets; current values are read when the shared coordinator handles
+// the event, and the accepted changes are published atomically in the run the
+// activation was made for. It is not a function value. A frontend delivers the
+// event and the operation's identity, never source to evaluate or mutable
+// access to a run's storage. The operation's identity, its association with a
+// run and inputs captured for later gestures remain to be stated.
 
 /// A scalar category independent of representation width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1494,6 +1520,17 @@ pub enum Report {
 // and the Params used to compute it. Required observations may delay
 // advancement; optional rendering may not. The location of the update loop is
 // unspecified.
+//
+// Decide: what a retained value promises when its backing or its run is
+// replaced: its original contents, readable, or an explicit stale-value
+// failure, and never bytes that belong to a replacement. An activation or an
+// observation bound to an old run cannot silently reach a successor run,
+// which does not prevent the shared application from registering a retained
+// query in the new run. Whether a backing and an activation stay valid for the
+// same lifetime is settled before one identity is chosen for both: storage
+// that moves within a run need not make a control stale. Keeping original
+// values readable may instead require retaining their backing until the
+// values are released.
 
 /// A State version within a run. Every completed update advances the version,
 /// independently of publication.
