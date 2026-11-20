@@ -15,9 +15,10 @@
 //! The boundary between the shared application and a frontend is stated
 //! here and agreed before a frontend in another repository depends on it.
 //! [`Application`] states passive editor and result descriptions, revision-
-//! checked editing, and explicit visible-result refresh for one frontend.
+//! checked editing and submission, pending interaction, bounded step control,
+//! and explicit visible-result refresh for one frontend.
 //!
-//! Gap: execution controls of the application/frontend boundary.
+//! Gap: additional application controls and host persistence capabilities.
 //! The input contract calls for no new application/runtime transport.
 //!
 //! A code generator describes compiled code as a [`Unit`]: its inputs,
@@ -1885,6 +1886,9 @@ pub trait Outcomes {
 /// either exposed buffer, its selections, availability or context, or the
 /// completion offer invalidate it, regardless of which application entry
 /// point made the change. Equal text does not restore an older revision.
+/// Prompt purpose, pending replacement and its selected choice, result
+/// selection, and derived draft-action availability also belong to this
+/// context, regardless of which application entry point changes them.
 /// Reading a view does not change its revision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputRevision(pub u64);
@@ -1973,9 +1977,8 @@ pub struct CompletionOffer<'a> {
 /// describes one active frontend; it is not a protocol for simultaneous
 /// editing controllers.
 ///
-/// Gap: prompt purpose and pending choices. A frontend must not infer a
-/// save-path prompt or a load choice from text. Until those are described,
-/// this facet alone cannot drive a complete prompt.
+/// Prompt purpose and pending decisions are given by [`InteractionView`],
+/// never inferred from text.
 pub struct InputView<'a> {
     pub revision: InputRevision,
     pub prompt: InputBuffer<'a>,
@@ -2060,6 +2063,173 @@ pub enum InputStatus {
     Invalid,
 }
 
+// ===========================================================================
+// Application interaction: shared submission and pending work
+// ===========================================================================
+
+/// What the current prompt edits. Text and selections remain in [`InputView`].
+/// A prepared save contains an editable command, not a separate path buffer;
+/// editing it into another command retains ordinary command semantics.
+/// Submitting it restores the suspended prompt text, selections and undo
+/// history on success and failure, even if the prepared command was edited
+/// into another command. After successful save, a captured replacement entry
+/// may then be submitted and consumed normally; failed save cannot execute
+/// or consume that replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptPurpose<'a> {
+    Entry,
+    PreparedSave {
+        /// A document-replacement command waiting for a successful save.
+        replacement: Option<&'a str>,
+    },
+}
+
+/// How to resolve a pending replacement of an unsaved document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplacementChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// A pending decision owned by the application. The command is descriptive;
+/// the frontend answers the choice rather than executing that text itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Replacement<'a> {
+    pub command: &'a str,
+    pub selected: ReplacementChoice,
+}
+
+/// One ongoing step operation within an application instance. Frontends copy
+/// and compare this identity, preserving all its bits. It remains valid across
+/// progress, is retired on finish, cancellation or supersession, and is never reused.
+/// It is distinct from a result identity, input revision and runtime version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StepId(pub u64);
+
+/// Accepted progress of the current ongoing step operation, borrowed without
+/// advancing it. Completed updates never exceed the requested total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepProgress<'a> {
+    pub id: StepId,
+    pub entry: &'a str,
+    pub completed: u64,
+    pub requested: u64,
+}
+
+/// Which draft-bound actions may be requested in the offered context.
+/// These flags are derived from application state; they promise neither
+/// successful compilation nor filesystem or execution-backend support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InteractionAvailability {
+    pub open_document: bool,
+    pub submit_prompt: bool,
+    pub apply_document: bool,
+    pub choose_replacement: bool,
+    pub cancel_prepared_prompt: bool,
+    pub return_to_input: bool,
+}
+
+/// Passive interaction state of the same application that owns [`InputView`].
+/// Its revision equals the input revision when borrowed without an intervening
+/// mutation. Purpose and pending decisions are never inferred from display text.
+/// This view introduces no second draft, command queue or execution model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InteractionView<'a> {
+    pub revision: InputRevision,
+    pub prompt: PromptPurpose<'a>,
+    pub replacement: Option<Replacement<'a>>,
+    pub step: Option<StepProgress<'a>>,
+    /// A selected result which may currently prevent ordinary editing.
+    pub selected_result: Option<ResultId>,
+    pub available: InteractionAvailability,
+}
+
+/// How submission handles an incomplete source entry. Both modes retain
+/// completion handling and the unsaved-document replacement guard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmitMode {
+    /// Continue an incomplete entry with a newline rather than executing it.
+    Normal,
+    /// Submit the text as written, including any incompleteness diagnostic.
+    AsWritten,
+}
+
+/// A semantic request to the application, independent of frontend keys/layout.
+///
+/// Draft-bound requests synchronize accepted source, check InputRevision, then
+/// check availability before their requested effects. Stale takes precedence.
+/// Rejection leaves requested edits, undo, submission and external effects
+/// untouched; synchronization may reveal newer already-accepted source.
+/// Every accepted draft-bound action invalidates its input revision even if
+/// text is unchanged. An unchanged synchronization does not invalidate it.
+///
+/// Step requests instead name the ongoing operation. A cancellation issued
+/// before a progress update must still stop that step; a retired identity
+/// cannot affect its successor. No input revision or per-slice ticket is needed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplicationAction {
+    /// Make the retained document draft available, preserving its edits and
+    /// the unfinished prompt, selections and undo history.
+    OpenDocument { revision: InputRevision },
+    /// Submit through the shared application preflight and answer acceptance.
+    /// An active completion is accepted first, without submission, except
+    /// that an already-matching offered command can proceed. Normal mode
+    /// continues incomplete source. Direct interactive replacement of an
+    /// unsaved document must offer its replacement decision first and cannot
+    /// replace it until Save succeeds or Discard is chosen; Cancel preserves
+    /// it. Commands inside a script retain their separate command semantics.
+    /// Submission of a prepared save restores its suspended prompt as
+    /// [`PromptPurpose`] states. Acceptance need not produce an outcome.
+    SubmitPrompt {
+        revision: InputRevision,
+        mode: SubmitMode,
+    },
+    /// Apply the retained document without replacing the unfinished prompt,
+    /// its selections or undo history. A failed Apply keeps the accepted run
+    /// and edited draft. Apply does not save or hide the document.
+    ApplyDocument { revision: InputRevision },
+    /// Advance at most one existing step slice, never start another operation.
+    /// The driver schedules at most one continuation at a time. Duplicate
+    /// requests for an active identity may advance further slices within the
+    /// already-requested total; requests after completion are stale.
+    ContinueStep { step: StepId },
+    /// Stop this operation at its last accepted slice and capture its normal
+    /// cancellation outcome. This is not rollback of completed slices or
+    /// interruption of synchronous compilation, evaluation or a launch.
+    CancelStep { step: StepId },
+    /// Save writes the draft without applying it. A failed save does not
+    /// replace the document; an untitled save prepares the prompt for a path.
+    /// Only successful save continues the captured replacement command.
+    /// Discard authorizes replacement without saving, not eager deletion of
+    /// the draft. A failed replacement keeps the accepted document and edited
+    /// draft, including after Discard. Cancel keeps the document and draft.
+    ChooseReplacement {
+        revision: InputRevision,
+        choice: ReplacementChoice,
+    },
+    /// Cancel a prepared save and its pending replacement, restoring the
+    /// suspended prompt. This does not clear an ordinary entry or cancel work.
+    CancelPreparedPrompt { revision: InputRevision },
+    /// Leave result selection, restoring the unchanged editing context.
+    ReturnToInput { revision: InputRevision },
+}
+
+/// Whether a semantic action was accepted. Acceptance is not a claim that
+/// compilation, execution or saving succeeded: those outcomes use the same
+/// retained results, diagnostics and feedback as other application actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionStatus {
+    Accepted,
+    /// Accepted with a request to leave the session. The frontend handles its
+    /// own lifecycle; this is not a promise to close a browser tab or window.
+    Exit,
+    /// The input revision or step identity no longer names the offered state.
+    Stale,
+    /// The revision is current but that action is unavailable in this context.
+    Unavailable,
+}
+
 /// The shared application's editing and captured results, consumed by a frontend.
 ///
 /// The application remains the sole owner of editing, undo and completion.
@@ -2078,9 +2248,16 @@ pub enum InputStatus {
 /// whether a current result changed, leaves originals intact, and preserves
 /// [`InputRevision`] unless the accepted source changed.
 ///
-/// Gap: submission, step continuation, prompt purposes and pending choices.
-/// These facets alone are not a complete Studio API.
+/// Interaction views are passive. Semantic actions share submission, Apply,
+/// decision handling and bounded step control with every other frontend.
+/// A driver must yield between step continuations to admit cancellation;
+/// the contract gives no hard cancellation latency or mid-call preemption.
+///
+/// Gap: filesystem/persistence capabilities, richer navigation and search,
+/// and source editing during an ongoing synchronous operation.
 pub trait Application {
+    fn interaction(&self) -> InteractionView<'_>;
+    fn act(&mut self, action: ApplicationAction) -> ActionStatus;
     fn input(&self) -> InputView<'_>;
     fn edit(&mut self, request: InputRequest) -> InputStatus;
     fn outcomes(&self) -> &dyn Outcomes;
