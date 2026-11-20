@@ -14,10 +14,10 @@
 //!
 //! The boundary between the shared application and a frontend is stated
 //! here and agreed before a frontend in another repository depends on it.
-//! [`Application`] states its input facet: passive editor descriptions and
-//! revision-checked operations for one active frontend.
+//! [`Application`] states passive editor and result descriptions, revision-
+//! checked editing, and explicit visible-result refresh for one frontend.
 //!
-//! Gap: execution and result facets of the application/frontend boundary.
+//! Gap: execution controls of the application/frontend boundary.
 //! The input contract calls for no new application/runtime transport.
 //!
 //! A code generator describes compiled code as a [`Unit`]: its inputs,
@@ -1562,6 +1562,232 @@ pub enum Stop {
 }
 
 // ===========================================================================
+// Captured results: decoded values and formatted fallback text
+// ===========================================================================
+
+/// The normalized value of one Range, including its static form.
+///
+/// Closed and Periodic forms have both ends, OpenAbove has only lower,
+/// OpenBelow has only upper, and Open has neither. Lower is inclusive and
+/// upper exclusive. A bounded upper end is at least its lower end; equality
+/// describes an empty Range. Missing means unbounded, never unknown.
+/// Endpoints use the signed I64 profile of [`Kind::Range`]. A producer
+/// converting origin and extent must add them exactly before checking the
+/// signed endpoint, without narrowing the extent first. If an endpoint does
+/// not fit, the containing capture is [`Content::Unreadable`] with
+/// [`Unshown::Range`]; it must not wrap, clamp or panic.
+///
+/// An Array domain is an ordered Tuple of these Range values, one per axis.
+/// It has no separate opaque value kind. Held domains and domains obtained
+/// without Array element readback use this same representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RangeValue {
+    pub form: AxisKind,
+    pub lower: Option<i64>,
+    pub upper: Option<i64>,
+}
+
+/// A scalar decoded from a value's storage.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Datum {
+    Bool(bool),
+    /// A source Int value, widened into i64 for readback (32-bit source
+    /// Ints today). This does not prescribe source arithmetic width.
+    /// Range endpoints belong to [`RangeValue`], not to this variant.
+    Int(i64),
+    Real(f64),
+}
+
+/// Accepted value data: decoded readback or captured descriptions, independent of storage and backend lifetimes.
+///
+/// This is the capture profile, not a replacement for [`Kinds`] or a
+/// general representation for every language value. In particular, a
+/// fiber's flattened component labels do not establish its canonical kind.
+/// A captured value pairs this content with its producing kind tables.
+///
+/// Gap: additional readback capabilities, including Sum decoding, paged
+/// Array payloads and direct device-backed rendering.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Content {
+    Absent,
+    /// An Optional whose payload is present, retaining nested presence.
+    Present(Box<Content>),
+    Scalar(Datum),
+    String(String),
+    Range(RangeValue),
+    /// One fiber, with one value per component in storage order.
+    Fiber {
+        components: Vec<String>,
+        values: Vec<Datum>,
+    },
+    /// One row per site in row-major order, with one value per component.
+    /// Every axis is bounded (Closed or Periodic), and the number of rows
+    /// is the product of the axis extents. The domain retains periodicity.
+    Array {
+        domain: Vec<RangeValue>,
+        components: Vec<String>,
+        sites: Vec<Vec<Datum>>,
+    },
+    /// An accepted domain without Array element readback. Its axes may be
+    /// open; this does not imply that all elements can be materialized.
+    ArraySummary(Vec<RangeValue>),
+    /// Ordered Tuple members, each with its own readback capability.
+    Tuple(Vec<Content>),
+    /// Named Struct members in canonical kind order.
+    Struct(Vec<(String, Content)>),
+    Unreadable(Unshown),
+}
+
+/// Why a capture has no data for this part of a value.
+/// A frontend may show it as unavailable; reading the description cannot
+/// retry or expand the capture. Obtaining more data is an explicit action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unshown {
+    /// This part was not obtained. In a description this includes scalar
+    /// payloads, unknown Optional presence and an undetermined Array domain.
+    /// It is not an assertion that the value is absent or unsupported.
+    NotCaptured,
+    /// Text storage, allocation or UTF-8 decoding did not yield a String.
+    String,
+    /// A Range payload or Array domain cannot be decoded within the
+    /// declared signed endpoint profile.
+    Range,
+    /// A fiber, or an Array of fibers, whose storage cannot be decoded.
+    Fiber,
+}
+
+/// The meaning of a text span. A frontend chooses its appearance; these
+/// roles prescribe no color, font, terminal attribute or screen geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ink {
+    Heading,
+    /// The headings of a table's columns.
+    Columns,
+    /// A command, option, component, view or value name that can be typed.
+    Name,
+    /// An argument placeholder such as DEMAND.
+    Placeholder,
+    /// An explanation, never a value.
+    Summary,
+    /// A label, such as a diagnostic location or line number.
+    Label,
+    /// The mark identifying the source a diagnostic is about.
+    Failing,
+}
+
+/// Captured display text and its semantic role, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub text: String,
+    pub ink: Option<Ink>,
+}
+
+/// Captured display text in span order. Formatting belongs to the producer;
+/// a frontend may wrap or lay out this text without rewording diagnostics.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Line {
+    pub spans: Vec<Span>,
+}
+
+/// A passive borrow of an accepted value or description.
+///
+/// The root belongs to these exact producing tables, independently of
+/// later program edits or expression registration. The producer retains
+/// the schema and decoded content for as long as it retains this capture.
+/// A borrow itself lasts only until the application can next be mutated.
+/// Reading this view neither resolves against the current program nor
+/// obtains values, reads storage or formats text.
+///
+/// Absent content means that no value data was captured; it is not Optional
+/// absence, which is [`Content::Absent`]. An Array description whose domain
+/// was obtained carries [`Content::ArraySummary`], even without held Array
+/// elements. Tuple and Struct descriptions use the corresponding recursive
+/// content with Array summaries in place. A member not obtained, including
+/// unknown Optional presence or an undetermined domain, is
+/// [`Content::Unreadable`] with [`Unshown::NotCaptured`]. Partial descriptions
+/// must not invent scalar payloads, Optional presence or bounded endpoints.
+/// This promises nothing about retaining or reading runtime-backed handles.
+///
+/// Gap: obtaining an unheld Optional's presence, an undetermined domain
+/// such as an anonymous open Array's bounded endpoint, structured access to
+/// authored rules, and source navigation from diagnostics.
+pub struct CapturedValue<'a> {
+    pub name: &'a str,
+    pub kinds: &'a Kinds,
+    pub kind: KindRef,
+    pub version: Option<Version>,
+    pub content: Option<&'a Content>,
+}
+
+/// The top-level values captured by one accepted outcome, in request order.
+/// Indexed reads borrow existing captures and perform no work on the session.
+pub trait CapturedValues {
+    fn value_count(&self) -> usize;
+    fn value(&self, index: usize) -> Option<CapturedValue<'_>>;
+}
+
+/// Whether the operation or observation this outcome describes succeeded.
+/// This is established from its data, never from text or a span's role.
+/// A successful operation may still report an unavailable watch. Failure
+/// does not imply rollback: completed updates or script actions can stand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutcomeStatus {
+    Succeeded,
+    Failed,
+}
+
+/// One accepted outcome. Text is its complete formatted fallback, which
+/// may combine values, inspection data, confirmations and diagnostics.
+/// Typed renderings may be shown alongside it; their availability does not
+/// authorize dropping other output. This facet gives no completeness promise
+/// for replacing the whole fallback: a successful answer can include values
+/// and failed watches, or script output not among the top-level values.
+/// A frontend must not parse or subtract value lines to recover semantics.
+///
+/// Structured diagnostics remain captured by the producer. This text view
+/// does not replace them or claim to be their machine-readable interface.
+/// Gap: a shared projection of diagnostic codes, fields and source labels.
+pub struct OutcomeView<'a> {
+    pub status: OutcomeStatus,
+    pub values: &'a dyn CapturedValues,
+    /// The accepted report of an explicit inspection, when present. This
+    /// does not repurpose supplier diagnostics as inspection data.
+    pub inspection: Option<&'a Report>,
+    pub text: &'a [Line],
+}
+
+/// A result's identity within one application instance. Frontends only
+/// copy and compare it. Retention, reflow and document edits do not reuse it;
+/// an identity from another application instance is not valid here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ResultId(pub u64);
+
+/// An accepted entry and its retained outcomes. Confirmation-only actions
+/// have neither a result identity nor a current outcome. Original is
+/// immutable and describes the submitted operation. Current is present
+/// exactly when result is present; for a live result it describes the
+/// latest accepted observation. It can fail without changing original's
+/// success or implying the submitted operation was rolled back.
+///
+/// Original text is the full submitted response. Current text is the
+/// result's chosen fallback, including observation-specific failure wording
+/// for a live result; it need not equal the original command's wording.
+pub struct ExchangeView<'a> {
+    pub entry: &'a str,
+    pub result: Option<ResultId>,
+    pub original: OutcomeView<'a>,
+    pub current: Option<OutcomeView<'a>>,
+}
+
+/// Retained accepted entries, oldest first. Indices are only valid within
+/// the current borrow; a frontend uses [`ResultId`] across updates.
+/// Eviction releases captures and makes their result identities inactive.
+pub trait Outcomes {
+    fn exchange_count(&self) -> usize;
+    fn exchange(&self, index: usize) -> Option<ExchangeView<'_>>;
+}
+
+// ===========================================================================
 // Application input: the shared editor and a frontend
 // ===========================================================================
 
@@ -1747,7 +1973,7 @@ pub enum InputStatus {
     Invalid,
 }
 
-/// The shared application's input facet, consumed by a frontend.
+/// The shared application's editing and captured results, consumed by a frontend.
 ///
 /// The application remains the sole owner of editing, undo and completion.
 /// [`Application::input`] is passive. [`Application::edit`] uses the same
@@ -1755,11 +1981,26 @@ pub enum InputStatus {
 /// accepted request invalidates its revision, even if no text changed, so
 /// an offer cannot be accepted twice.
 ///
-/// Gap: submission, step continuation, visible-result observation and typed
-/// accepted outcomes. This input facet alone is not a complete Studio API.
+/// Accepted results and confirmation text are passive captures. Refresh is
+/// an explicit request for the given visible result identities, using the
+/// application's existing observations; painting and getters never refresh.
+/// Refresh may launch computation and read storage for the given identities.
+/// A refresh failure becomes that result's current outcome rather than a
+/// separate returned error. Duplicate and expired identities are harmless;
+/// hidden results add no observation demand through this call. Refresh reports
+/// whether a current result changed, leaves originals intact, and preserves
+/// [`InputRevision`] unless the accepted source changed.
+///
+/// Gap: submission, step continuation, prompt purposes and pending choices.
+/// These facets alone are not a complete Studio API.
 pub trait Application {
     fn input(&self) -> InputView<'_>;
     fn edit(&mut self, request: InputRequest) -> InputStatus;
+    fn outcomes(&self) -> &dyn Outcomes;
+    /// Current action confirmation, captured once when accepted. It may be
+    /// present without any result identity and follows input dismissal.
+    fn feedback(&self) -> &[Line];
+    fn refresh(&mut self, visible: &[ResultId]) -> bool;
 }
 
 // Well-formedness checks and all other implementations.
