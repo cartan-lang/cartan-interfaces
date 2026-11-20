@@ -435,6 +435,50 @@ mod layout {
         assert!(!layouts.fits(untagged, &kinds, shape));
         assert_eq!(measures.spans[sum.0 as usize], [(0, 16)]);
     }
+
+    #[test]
+    fn one_layout_may_hold_a_bool_and_an_int_and_only_the_kind_tells_them_apart() {
+        let mut kinds = Kinds::default();
+        let flag = kinds.fiber(Fiber::Bool);
+        let flag = kinds.define(Kind::Fiber(flag));
+        let count = kinds.fiber(Fiber::Int);
+        let count = kinds.define(Kind::Fiber(count));
+        let pair = kinds.define(Kind::Tuple(vec![flag, count]));
+        let real = kinds.fiber(Fiber::Real);
+        let choice = kinds.fiber(Fiber::Sum(vec![
+            ("None".to_string(), None),
+            ("Some".to_string(), Some(real)),
+        ]));
+
+        let mut layouts = Layouts::default();
+        let word = layouts.define(Layout::Scalar(Scalar::I32));
+        let words = layouts.define(Layout::Repeat {
+            part: word,
+            count: 2,
+            plane_step: 0,
+            offset_step: 4,
+        });
+        assert!(layouts.fits(words, &kinds, pair));
+
+        let RepresentationForm::Each(members) = Representation::Kind(pair).form(&kinds) else {
+            panic!("a Tuple reads as its members in order");
+        };
+        let forms: Vec<_> = members.iter().map(|member| member.form(&kinds)).collect();
+        assert_eq!(
+            forms,
+            [
+                RepresentationForm::Scalar(Primitive::Bool),
+                RepresentationForm::Scalar(Primitive::Int)
+            ]
+        );
+        assert_eq!(
+            Representation::Fiber(choice).form(&kinds),
+            RepresentationForm::Each(vec![
+                Representation::Scalar(Primitive::Int),
+                Representation::Fiber(real),
+            ])
+        );
+    }
 }
 
 mod unit {

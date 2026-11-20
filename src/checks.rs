@@ -654,15 +654,20 @@ impl Layouts {
     ///
     /// Kinds with unspecified storage match no layout.
     pub fn fits(&self, layout: LayoutRef, kinds: &Kinds, kind: KindRef) -> bool {
-        self.holds(layout, kinds, Held::Kind(kind), &mut HashMap::new())
+        self.holds(
+            layout,
+            kinds,
+            Representation::Kind(kind),
+            &mut HashMap::new(),
+        )
     }
 
     fn holds(
         &self,
         layout: LayoutRef,
         kinds: &Kinds,
-        held: Held,
-        known: &mut HashMap<(LayoutRef, Held), bool>,
+        held: Representation,
+        known: &mut HashMap<(LayoutRef, Representation), bool>,
     ) -> bool {
         if let Some(answer) = known.get(&(layout, held)) {
             return *answer;
@@ -671,34 +676,36 @@ impl Layouts {
             return false;
         };
         let answer = match (how, held.form(kinds)) {
-            (Layout::Utf8, Form::String) => true,
-            (Layout::Scalar(Scalar::I64), Form::Endpoint) => true,
-            (Layout::Scalar(scalar), Form::Scalar(primitive)) => scalar.stores(primitive),
-            (Layout::Array(element), Form::Array(fiber)) => {
-                self.holds(*element, kinds, Held::Fiber(fiber), known)
+            (Layout::Utf8, RepresentationForm::String) => true,
+            (Layout::Scalar(Scalar::I64), RepresentationForm::Endpoint) => true,
+            (Layout::Scalar(scalar), RepresentationForm::Scalar(primitive)) => {
+                scalar.stores(primitive)
             }
-            (Layout::Optional(inner), Form::Optional(kind)) => {
-                self.holds(*inner, kinds, Held::Kind(kind), known)
+            (Layout::Array(element), RepresentationForm::Array(fiber)) => {
+                self.holds(*element, kinds, Representation::Fiber(fiber), known)
             }
-            (Layout::Group(parts), Form::Each(members)) => {
+            (Layout::Optional(inner), RepresentationForm::Optional(kind)) => {
+                self.holds(*inner, kinds, Representation::Kind(kind), known)
+            }
+            (Layout::Group(parts), RepresentationForm::Each(members)) => {
                 let mut pairs = parts.iter().zip(&members);
                 parts.len() == members.len()
                     && pairs.all(|(part, held)| self.holds(part.layout, kinds, *held, known))
             }
-            (Layout::Group(parts), Form::Alike(member, count)) => {
+            (Layout::Group(parts), RepresentationForm::Alike(member, count)) => {
                 parts.len() as u64 == u64::from(count)
                     && parts
                         .iter()
                         .all(|part| self.holds(part.layout, kinds, member, known))
             }
             // A repeat represents a group of identical parts.
-            (Layout::Repeat { part, count, .. }, Form::Each(members)) => {
+            (Layout::Repeat { part, count, .. }, RepresentationForm::Each(members)) => {
                 *count as usize == members.len()
                     && members
                         .iter()
                         .all(|held| self.holds(*part, kinds, *held, known))
             }
-            (Layout::Repeat { part, count, .. }, Form::Alike(member, width)) => {
+            (Layout::Repeat { part, count, .. }, RepresentationForm::Alike(member, width)) => {
                 *count == width && self.holds(*part, kinds, member, known)
             }
             _ => false,
@@ -708,72 +715,54 @@ impl Layouts {
     }
 }
 
-/// A kind or fiber whose layout is being checked.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Held {
-    Kind(KindRef),
-    Fiber(FiberRef),
-    Field(Field),
-    Scalar(Primitive),
-    Endpoint,
-}
-
-/// The immediate structure required by a kind or fiber.
-enum Form {
-    String,
-    Endpoint,
-    Scalar(Primitive),
-    /// Parts in order.
-    Each(Vec<Held>),
-    /// A fixed number of identical parts.
-    Alike(Held, u32),
-    Array(FiberRef),
-    Optional(KindRef),
-    /// An unspecified storage representation.
-    Unknown,
-}
-
-impl Held {
-    fn form(self, kinds: &Kinds) -> Form {
-        let alike = |primitive, count| Form::Alike(Held::Scalar(primitive), count);
-        let fibers = |fibers: Vec<FiberRef>| fibers.into_iter().map(Held::Fiber);
+impl Representation {
+    /// The structure this representation requires of its layout, one level
+    /// down. Nothing is expanded further and no stored value is read.
+    pub fn form(self, kinds: &Kinds) -> RepresentationForm {
+        let alike =
+            |primitive, count| RepresentationForm::Alike(Representation::Scalar(primitive), count);
+        let fibers = |fibers: Vec<FiberRef>| fibers.into_iter().map(Representation::Fiber);
         match self {
-            Held::Endpoint => Form::Endpoint,
-            Held::Scalar(primitive) => Form::Scalar(primitive),
-            Held::Field(Field::Real) => Form::Scalar(Primitive::Real),
-            Held::Field(Field::Rational) => alike(Primitive::Int, 2),
-            Held::Field(Field::Complex) => alike(Primitive::Real, 2),
-            Held::Fiber(fiber) => match kinds.get_fiber(fiber) {
-                Some(Fiber::Bool) => Form::Scalar(Primitive::Bool),
-                Some(Fiber::Int) => Form::Scalar(Primitive::Int),
-                Some(Fiber::Real) => Form::Scalar(Primitive::Real),
+            Representation::Endpoint => RepresentationForm::Endpoint,
+            Representation::Scalar(primitive) => RepresentationForm::Scalar(primitive),
+            Representation::Field(Field::Real) => RepresentationForm::Scalar(Primitive::Real),
+            Representation::Field(Field::Rational) => alike(Primitive::Int, 2),
+            Representation::Field(Field::Complex) => alike(Primitive::Real, 2),
+            Representation::Fiber(fiber) => match kinds.get_fiber(fiber) {
+                Some(Fiber::Bool) => RepresentationForm::Scalar(Primitive::Bool),
+                Some(Fiber::Int) => RepresentationForm::Scalar(Primitive::Int),
+                Some(Fiber::Real) => RepresentationForm::Scalar(Primitive::Real),
                 Some(Fiber::Rational) => alike(Primitive::Int, 2),
                 Some(Fiber::Complex) => alike(Primitive::Real, 2),
                 Some(Fiber::Color) => alike(Primitive::Real, 4),
-                Some(Fiber::Vector { over, count }) => Form::Alike(Held::Field(*over), *count),
+                Some(Fiber::Vector { over, count }) => {
+                    RepresentationForm::Alike(Representation::Field(*over), *count)
+                }
                 Some(product @ Fiber::Product(_)) => {
-                    Form::Each(fibers(Kinds::parts(product)).collect())
+                    RepresentationForm::Each(fibers(Kinds::parts(product)).collect())
                 }
                 // An Int tag, then every variant's payload in declared order.
                 Some(sum @ Fiber::Sum(_)) => {
-                    let tag = std::iter::once(Held::Scalar(Primitive::Int));
-                    Form::Each(tag.chain(fibers(Kinds::parts(sum))).collect())
+                    let tag = std::iter::once(Representation::Scalar(Primitive::Int));
+                    RepresentationForm::Each(tag.chain(fibers(Kinds::parts(sum))).collect())
                 }
-                _ => Form::Unknown,
+                _ => RepresentationForm::Unknown,
             },
-            Held::Kind(kind) => match kinds.get(kind) {
-                Some(Kind::String) => Form::String,
-                Some(Kind::Range(form)) => Form::Alike(Held::Endpoint, form.endpoint_count()),
-                Some(Kind::Fiber(fiber)) => Held::Fiber(*fiber).form(kinds),
-                Some(Kind::Array { element, .. }) => Form::Array(*element),
-                Some(Kind::Optional(inner)) => Form::Optional(*inner),
-                Some(members @ (Kind::Struct(_) | Kind::Tuple(_))) => Form::Each(
+            Representation::Kind(kind) => match kinds.get(kind) {
+                Some(Kind::String) => RepresentationForm::String,
+                Some(Kind::Range(form)) => {
+                    RepresentationForm::Alike(Representation::Endpoint, form.endpoint_count())
+                }
+                Some(Kind::Fiber(fiber)) => Representation::Fiber(*fiber).form(kinds),
+                Some(Kind::Array { element, .. }) => RepresentationForm::Array(*element),
+                Some(Kind::Optional(inner)) => RepresentationForm::Optional(*inner),
+                Some(members @ (Kind::Struct(_) | Kind::Tuple(_))) => RepresentationForm::Each(
                     Kinds::children(members)
                         .into_iter()
-                        .map(Held::Kind)
+                        .map(Representation::Kind)
                         .collect(),
                 ),
-                None => Form::Unknown,
+                None => RepresentationForm::Unknown,
             },
         }
     }

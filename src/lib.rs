@@ -441,6 +441,48 @@ pub struct Measures {
     pub spans: Vec<Vec<(u32, u32)>>,
 }
 
+/// What a layout stands for, read one level at a time: a kind, a fiber, a
+/// field, a scalar of a primitive category or a Range endpoint. A layout fits
+/// a kind when, from the kind down, each layout has the
+/// [`RepresentationForm`] of what it stands for. One layout can stand for
+/// different representations at different places, so a representation is
+/// paired with a layout rather than read from it: a Tuple of a Bool and an
+/// Int may use one `Repeat` of `I32` for both, and only the pairing tells
+/// which word is the Bool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Representation {
+    Kind(KindRef),
+    Fiber(FiberRef),
+    Field(Field),
+    Scalar(Primitive),
+    /// A Range endpoint, stored as `I64` whatever the width of Int.
+    Endpoint,
+}
+
+/// The structure a [`Representation`] requires of its layout, one level
+/// down.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepresentationForm {
+    /// [`Layout::Utf8`].
+    String,
+    /// A Range endpoint: [`Layout::Scalar`] of `I64`.
+    Endpoint,
+    /// [`Layout::Scalar`] of a [`Scalar`] that stores the category.
+    Scalar(Primitive),
+    /// Parts in order: a [`Layout::Group`] with one part for each, or a
+    /// [`Layout::Repeat`] with one copy for each whose layout fits all.
+    Each(Vec<Representation>),
+    /// A fixed number of identical parts: a group of that many parts or a
+    /// repeat of that many copies.
+    Alike(Representation, u32),
+    /// [`Layout::Array`] of the fiber's layout.
+    Array(FiberRef),
+    /// [`Layout::Optional`] of the kind's layout.
+    Optional(KindRef),
+    /// Storage this contract does not yet specify; no layout fits it.
+    Unknown,
+}
+
 // ===========================================================================
 // Programs: source declarations
 // ===========================================================================
