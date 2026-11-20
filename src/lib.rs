@@ -12,12 +12,13 @@
 //! implement [`Supplier`] for the same runtime. What an application asks of
 //! a runtime is not stated either, while both live in one repository.
 //!
-//! Gap: the boundary between the shared application and a frontend is not
-//! stated yet. It belongs here, under the rule that every boundary between
-//! components is stated here, and is agreed before a frontend in another
-//! repository depends on it. One concrete second frontend bounds the
-//! proposal. It calls for no new transport between an application and a
-//! runtime.
+//! The boundary between the shared application and a frontend is stated
+//! here and agreed before a frontend in another repository depends on it.
+//! [`Application`] states its input facet: passive editor descriptions and
+//! revision-checked operations for one active frontend.
+//!
+//! Gap: execution and result facets of the application/frontend boundary.
+//! The input contract calls for no new application/runtime transport.
 //!
 //! A code generator describes compiled code as a [`Unit`]: its inputs,
 //! results, storage requirements and stages. The runtime binds inputs,
@@ -1558,6 +1559,207 @@ pub enum Stop {
     Invariant,
     /// A device or its driver failed.
     Device,
+}
+
+// ===========================================================================
+// Application input: the shared editor and a frontend
+// ===========================================================================
+
+/// Freshness of an application's offered input state.
+///
+/// A frontend only copies and compares this token. It belongs to one
+/// application instance and must not be reused with another. Changes to
+/// either exposed buffer, its selections, availability or context, or the
+/// completion offer invalidate it, regardless of which application entry
+/// point made the change. Equal text does not restore an older revision.
+/// Reading a view does not change its revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputRevision(pub u64);
+
+/// One of the shared application's editing contexts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputTarget {
+    /// The command or expression being composed, including a save-path
+    /// prompt.
+    Prompt,
+    /// The available document draft.
+    Document,
+}
+
+/// A selection in UTF-8 byte offsets, with its direction preserved.
+///
+/// The anchor stays fixed while the cursor moves. A collapsed selection
+/// has equal positions. Requests may supply positions to be fitted;
+/// selections returned by [`TextBuffer`] are canonical.
+/// Any remembered column for vertical movement belongs to the editor, not
+/// this description.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextSelection {
+    pub anchor: usize,
+    pub cursor: usize,
+}
+
+/// Passive access to an existing editor buffer.
+///
+/// Text uses LF newlines. Selections are nonempty, ordered and disjoint,
+/// and [`TextBuffer::primary`] identifies one of them. Returned positions
+/// lie within the buffer on extended grapheme boundaries. These methods
+/// neither edit the buffer nor consult a session, filesystem or execution
+/// backend.
+pub trait TextBuffer {
+    fn text(&self) -> &str;
+    fn selection_count(&self) -> usize;
+    fn selection(&self, index: usize) -> Option<TextSelection>;
+    fn primary(&self) -> usize;
+}
+
+/// A buffer and whether ordinary editing is currently available.
+///
+/// A modal choice, an operation in progress or an editor search can make a
+/// buffer unavailable. A frontend can still read its text. Availability
+/// does not imply that this is the frontend's focused widget.
+pub struct InputBuffer<'a> {
+    pub text: &'a dyn TextBuffer,
+    pub editable: bool,
+}
+
+/// One completion offered by the application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletionChoice<'a> {
+    pub text: &'a str,
+    pub description: Option<&'a str>,
+}
+
+/// Passive access to an existing prompt-completion offer.
+///
+/// Choices are nonempty. A [`CompletionOffer`] identifies its selected
+/// choice and its half-open UTF-8 replacement range in the prompt of the
+/// same [`InputView`]. Labels, descriptions and ordering come from the
+/// application. Reading them does not recompute completion or alter the
+/// chosen item.
+pub trait CompletionChoices {
+    fn choice_count(&self) -> usize;
+    fn choice(&self, index: usize) -> Option<CompletionChoice<'_>>;
+}
+
+/// A completion offer in one input revision.
+///
+/// The selected index is valid and the replacement range lies within the
+/// offered prompt on grapheme boundaries. Acceptance inserts the indexed
+/// choice into this range.
+pub struct CompletionOffer<'a> {
+    pub replacement: std::ops::Range<usize>,
+    pub selected: usize,
+    pub choices: &'a dyn CompletionChoices,
+}
+
+/// Borrowed input state of the shared application.
+///
+/// The revision covers both buffers and the completion offer. Every borrow
+/// is valid only while the application is immutably borrowed. This
+/// describes one active frontend; it is not a protocol for simultaneous
+/// editing controllers.
+///
+/// Gap: prompt purpose and pending choices. A frontend must not infer a
+/// save-path prompt or a load choice from text. Until those are described,
+/// this facet alone cannot drive a complete prompt.
+pub struct InputView<'a> {
+    pub revision: InputRevision,
+    pub prompt: InputBuffer<'a>,
+    pub document: Option<InputBuffer<'a>>,
+    pub completion: Option<CompletionOffer<'a>>,
+}
+
+/// An editor operation, independent of physical keys or widget events.
+///
+/// None of these operations submits a command, applies a document or
+/// evaluates a value. Input targeting an unavailable buffer is refused.
+/// Replacement and selection positions are UTF-8 byte offsets in the
+/// offered text; a frontend using other coordinates converts them before
+/// making the request. All target operations obey the buffer's editable
+/// flag. An absent document is unavailable. Completion operations target
+/// the prompt and obey its availability too. An absent offer is unavailable;
+/// an invalid index into a present offer is invalid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputAction {
+    /// Insert at the buffer's current selections, using ordinary typing and
+    /// undo grouping. CRLF and CR newlines become LF.
+    Insert { target: InputTarget, text: String },
+    /// Replace one half-open range as a separate undo step. The start must
+    /// not exceed the end, and the end must not exceed the text length;
+    /// these limits are checked before fitting either position.
+    /// Positions within a grapheme fit to its beginning. Selections move
+    /// with the edit. CRLF and CR newlines become LF.
+    Replace {
+        target: InputTarget,
+        range: std::ops::Range<usize>,
+        text: String,
+    },
+    /// Place selections without editing. At least one selection is required
+    /// and primary must identify it. Positions fit to the buffer and to the
+    /// beginning of a grapheme; selections that meet merge.
+    Select {
+        target: InputTarget,
+        selections: Vec<TextSelection>,
+        primary: usize,
+    },
+    /// Undo one step. Empty undo history is an accepted no-op.
+    Undo(InputTarget),
+    /// Redo one step. Empty redo history is an accepted no-op.
+    Redo(InputTarget),
+    /// Complete at the primary prompt cursor. No matches is an accepted
+    /// no-op. A unique match may insert immediately. Multiple matches may
+    /// both extend the common prefix and offer a menu.
+    /// This may consult the accepted program and help tables, but executes
+    /// no values.
+    Complete,
+    /// Insert this choice from the offer in the supplied revision.
+    /// Acceptance consumes that offer and does not submit, even for a
+    /// complete command.
+    AcceptCompletion { index: usize },
+}
+
+/// An operation against the exact input state the frontend was shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputRequest {
+    pub revision: InputRevision,
+    pub action: InputAction,
+}
+
+/// Whether the requested input operation was accepted.
+///
+/// Rejections change none of the requested editor, completion or undo
+/// state. Before checking the
+/// revision, an application may synchronize already accepted session
+/// changes; a stale response can therefore accompany a newer view. An
+/// unchanged synchronization must not itself invalidate an otherwise
+/// current request. After synchronization, stale takes precedence over
+/// other refusals. [`InputStatus::Unavailable`] and
+/// [`InputStatus::Invalid`] leave the supplied revision current.
+/// [`InputStatus::Stale`] requires a new call to [`Application::input`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputStatus {
+    Accepted,
+    Stale,
+    Unavailable,
+    /// A replacement range, selection set, primary index or choice index
+    /// was invalid for the offered state.
+    Invalid,
+}
+
+/// The shared application's input facet, consumed by a frontend.
+///
+/// The application remains the sole owner of editing, undo and completion.
+/// [`Application::input`] is passive. [`Application::edit`] uses the same
+/// editor and completion operations as other application inputs. Every
+/// accepted request invalidates its revision, even if no text changed, so
+/// an offer cannot be accepted twice.
+///
+/// Gap: submission, step continuation, visible-result observation and typed
+/// accepted outcomes. This input facet alone is not a complete Studio API.
+pub trait Application {
+    fn input(&self) -> InputView<'_>;
+    fn edit(&mut self, request: InputRequest) -> InputStatus;
 }
 
 // Well-formedness checks and all other implementations.
