@@ -1544,6 +1544,19 @@ pub trait Supplier {
     /// supplier, so a document that was refused can still be described.
     fn describe(diagnostic: &Self::Diagnostic) -> Report;
 
+    /// Preview a logical fusion plan without target emission, value demand,
+    /// mutation of accepted choices, or access to runtime State contents.
+    /// `None` means this supplier does not offer planning previews. A refusal
+    /// leaves the supplier unchanged. Multiple demands describe one joint plan.
+    fn fusion_plan(
+        &self,
+        demands: &[Demand],
+        choice: &FusionChoice,
+    ) -> Option<Result<FusionPlan, Self::Diagnostic>> {
+        let _ = (demands, choice);
+        None
+    }
+
     /// The inspection commands this supplier offers.
     fn inspections(&self) -> Vec<Inspection> {
         Vec::new()
@@ -1562,6 +1575,70 @@ pub trait Supplier {
         let _ = (component, view, arguments, target);
         None
     }
+}
+
+/// Which materialization choices a read-only planning preview should use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FusionChoice {
+    /// The supplier's choices currently in force for these demands.
+    Current,
+    /// The supplier's default choices.
+    Default,
+    /// Exact opaque candidate identities to materialize; empty means fully fused.
+    Materialize(Vec<String>),
+}
+
+/// One logical site computation that may be materialized over its domain.
+/// Names are annotations; `identity` identifies the computation independently
+/// of whether an Array declaration was authored for it.
+#[derive(Clone, Debug)]
+pub struct MaterializationCandidate {
+    pub identity: String,
+    pub short: String,
+    pub names: Vec<String>,
+    /// Kind and domain notation for display, never executable expressions.
+    pub kind: String,
+    pub domain: String,
+    /// A concise expression notation; shared operands use graph references.
+    pub expression: String,
+    /// The root in the preview's descriptive computation graph.
+    pub body: u32,
+    pub materialized: bool,
+    pub default: bool,
+    /// Distinct index mappings per output site, when counted within budget.
+    pub instances: Option<usize>,
+    /// Candidate identities of consumers, or the distinguished label `result`.
+    pub readers: Vec<String>,
+    /// Logical storage slots; these do not identify device allocations.
+    pub slots: Vec<u32>,
+    /// Fill and last-use region indices, when storage is present.
+    pub lifetime: Option<(usize, usize)>,
+}
+
+/// One scheduled logical region, before target emission. The description
+/// includes computation, guards and reductions; it is display-only data.
+/// Region boundaries do not imply State publication or completion waits.
+#[derive(Clone, Debug)]
+pub struct FusionRegion {
+    pub reads: Vec<u32>,
+    pub writes: Vec<u32>,
+    pub description: Report,
+}
+
+/// An immutable, target-independent planning preview for an exact demand set.
+/// No values have been obtained and no active planning choices changed.
+/// `graph` describes shared computations once, with local node references;
+/// presentation may display it but must not derive executable semantics from it.
+#[derive(Clone, Debug)]
+pub struct FusionPlan {
+    pub demands: Vec<Demand>,
+    /// Canonical path of the materialized candidates, or `-` for none.
+    pub path: String,
+    pub candidates: Vec<MaterializationCandidate>,
+    pub regions: Vec<FusionRegion>,
+    /// Number of logical scratch slots, not an estimate of allocated bytes.
+    pub scratch_slots: usize,
+    pub graph: Report,
 }
 
 /// A supplier-provided development inspection command.
