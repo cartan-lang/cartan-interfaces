@@ -2130,6 +2130,78 @@ pub struct InteractionAvailability {
     pub return_to_input: bool,
 }
 
+/// How much of each declaration's readout the document view shows: none,
+/// its first line, or all of it on continuation rows that take no source
+/// line number. Full is a presentation of the same outcome, not a request
+/// for more of a value, such as every element of an Array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadoutMode {
+    None,
+    Compact,
+    Full,
+}
+
+/// How the application presents its document. The application owns these
+/// settings, so every frontend shows the same; a frontend owns geometry,
+/// wrapping and alignment. Reopening the document keeps them; an
+/// application starts with compact readouts and line numbers shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentPresentation {
+    pub readouts: ReadoutMode,
+    pub line_numbers: bool,
+}
+
+/// The readout of one showable declaration of the document draft, one the
+/// accepted program also declares by the same name.
+///
+/// `declaration` is the declaration's half-open range of UTF-8 byte
+/// offsets in the document text of the [`InputView`] lent at the same
+/// [`InputRevision`], from its first byte to the end of its last line; both
+/// ends lie within that text on character boundaries. A frontend aligns the
+/// readout with the range's first line.
+///
+/// `result` is drawn from the one space of [`ResultId`]s that exchanges use
+/// and is never reused. It is stable while the row is retained, through
+/// refresh, step progress and presentation changes. Reconciling the draft
+/// with the accepted source may retire a row; deleting, renaming or removing
+/// the declaration, or replacing the document, retires it; a row made again
+/// takes a fresh identity. It is refreshed like any other result identity,
+/// so a readout's value is obtained only for visible identities, through the
+/// application's existing observations.
+///
+/// `current` is the latest capture of the accepted program's value of the
+/// name, which may be older than the run's values until the next refresh.
+/// It is never an evaluation of draft text. When the accepted source is
+/// replaced, its rows are retired and their captures cleared; no capture is
+/// carried over to a new definition. Readouts are separate from submitted
+/// exchanges and never enter [`Outcomes`].
+pub struct Readout<'a> {
+    pub name: &'a str,
+    pub declaration: std::ops::Range<usize>,
+    pub result: ResultId,
+    /// The latest accepted observation, absent until the first refresh.
+    pub current: Option<OutcomeView<'a>>,
+}
+
+/// The draft's readouts in source order, borrowed without obtaining values.
+/// There is a row only where the draft's declaration and the accepted
+/// program's correspond by name, and while the draft is not the accepted
+/// source the application may lend none; a draft that does not parse, or
+/// an application with no document, lends none. Reading readouts or the
+/// presentation is passive; the application reconciles readouts with the
+/// draft at its own mutation and synchronization boundaries, never in a
+/// frontend's painting. Indices are valid only within the borrow;
+/// [`ResultId`] persists as [`Readout`] states.
+pub trait Readouts {
+    /// Whether the draft is the accepted source. While it is not, every
+    /// readout shows the accepted program, which an edit anywhere in the
+    /// draft, upstream of a declaration included, may have changed, so a
+    /// frontend marks the readouts as those of the applied document.
+    fn applied(&self) -> bool;
+    fn readout_count(&self) -> usize;
+    fn readout(&self, index: usize) -> Option<Readout<'_>>;
+}
+
 /// Passive interaction state of the same application that owns [`InputView`].
 /// Its revision equals the input revision when borrowed without an intervening
 /// mutation. Purpose and pending decisions are never inferred from display text.
@@ -2142,6 +2214,7 @@ pub struct InteractionView<'a> {
     pub step: Option<StepProgress<'a>>,
     /// A selected result which may currently prevent ordinary editing.
     pub selected_result: Option<ResultId>,
+    pub presentation: DocumentPresentation,
     pub available: InteractionAvailability,
 }
 
@@ -2213,6 +2286,18 @@ pub enum ApplicationAction {
     CancelPreparedPrompt { revision: InputRevision },
     /// Leave result selection, restoring the unchanged editing context.
     ReturnToInput { revision: InputRevision },
+    /// Change how the document is presented. Every frontend's command for
+    /// it, such as a terminal's `/doc results compact`, is this action. It
+    /// is available at any current revision, with or without a document or
+    /// a pending decision, and changes the settings alone: buffers,
+    /// selections, undo, pending decisions and the step under way are kept,
+    /// and nothing is computed. Like every draft-bound action it is checked
+    /// for staleness first, and once accepted it invalidates the revision
+    /// even when the settings are unchanged.
+    SetDocumentPresentation {
+        revision: InputRevision,
+        presentation: DocumentPresentation,
+    },
 }
 
 /// Whether a semantic action was accepted. Acceptance is not a claim that
@@ -2239,14 +2324,19 @@ pub enum ActionStatus {
 /// an offer cannot be accepted twice.
 ///
 /// Accepted results and confirmation text are passive captures. Refresh is
-/// an explicit request for the given visible result identities, using the
-/// application's existing observations; painting and getters never refresh.
+/// an explicit request for the given visible result identities, those of
+/// exchanges and of readouts alike, using the application's existing
+/// observations for both; painting and getters never refresh or reconcile.
+/// An observation alone changes no [`InputRevision`], result identity or
+/// readout range. Showing no readouts, or changing the presentation, adds no
+/// demand, and a full readout renders the outcome already captured.
 /// Refresh may launch computation and read storage for the given identities.
 /// A refresh failure becomes that result's current outcome rather than a
 /// separate returned error. Duplicate and expired identities are harmless;
 /// hidden results add no observation demand through this call. Refresh reports
-/// whether a current result changed, leaves originals intact, and preserves
-/// [`InputRevision`] unless the accepted source changed.
+/// whether a current outcome changed, an exchange's or a readout's, leaves
+/// originals intact, and preserves [`InputRevision`] unless the accepted
+/// source changed.
 ///
 /// Interaction views are passive. Semantic actions share submission, Apply,
 /// decision handling and bounded step control with every other frontend.
@@ -2261,6 +2351,7 @@ pub trait Application {
     fn input(&self) -> InputView<'_>;
     fn edit(&mut self, request: InputRequest) -> InputStatus;
     fn outcomes(&self) -> &dyn Outcomes;
+    fn readouts(&self) -> &dyn Readouts;
     /// Current action confirmation, captured once when accepted. It may be
     /// present without any result identity and follows input dismissal.
     fn feedback(&self) -> &[Line];
