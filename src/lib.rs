@@ -2160,30 +2160,31 @@ pub struct DocumentPresentation {
     pub line_numbers: bool,
 }
 
-/// The readout of one showable declaration of the document draft, one the
-/// accepted program also declares by the same name.
+/// The captured readout of one showable declaration in the accepted document,
+/// attached to its source line in the document draft.
 ///
-/// `declaration` is the declaration's half-open range of UTF-8 byte
-/// offsets in the document text of the [`InputView`] lent at the same
-/// [`InputRevision`], from its first byte to the end of its last line; both
-/// ends lie within that text on character boundaries. A frontend aligns the
-/// readout with the range's first line.
+/// `declaration` is a half-open range of UTF-8 byte offsets in the document
+/// text of the [`InputView`] lent at the same [`InputRevision`]. Both ends lie
+/// within that text on character boundaries; the first identifies the attached
+/// source line. The range may cover just that line while editing. A frontend
+/// aligns the readout with the range's first line.
 ///
 /// `result` is drawn from the one space of [`ResultId`]s that exchanges use
-/// and is never reused. It is stable while the row is retained, through
-/// refresh, step progress and presentation changes. Reconciling the draft
-/// with the accepted source may retire a row; deleting, renaming or removing
-/// the declaration, or replacing the document, retires it; a row made again
-/// takes a fresh identity. It is refreshed like any other result identity,
-/// so a readout's value is obtained only for visible identities, through the
-/// application's existing observations.
+/// and is never reused. It persists through refresh, presentation changes,
+/// draft edits and line moves. Incomplete syntax and renaming in the draft
+/// retain the row, its accepted name and its capture. Deleting its source line
+/// hides the row; undo restores it with the same identity and capture. Applying
+/// or replacing the accepted document retires its rows and establishes new
+/// ones; no capture is carried over to a new accepted definition.
 ///
 /// `current` is the latest capture of the accepted program's value of the
-/// name, which may be older than the run's values until the next refresh.
-/// It is never an evaluation of draft text. When the accepted source is
-/// replaced, its rows are retired and their captures cleared; no capture is
-/// carried over to a new definition. Readouts are separate from submitted
-/// exchanges and never enter [`Outcomes`].
+/// name. While the draft matches the accepted source it is refreshed, like
+/// other result identities, only when visible through the application's
+/// existing observations. While the draft differs, the capture is frozen:
+/// neither editing nor refreshing evaluates it, even if the live run advances.
+/// It is never an evaluation of draft text. Failed Apply preserves the rows
+/// and captures. Readouts are separate from submitted exchanges and never
+/// enter [`Outcomes`].
 pub struct Readout<'a> {
     pub name: &'a str,
     pub declaration: std::ops::Range<usize>,
@@ -2193,19 +2194,17 @@ pub struct Readout<'a> {
 }
 
 /// The draft's readouts in source order, borrowed without obtaining values.
-/// There is a row only where the draft's declaration and the accepted
-/// program's correspond by name, and while the draft is not the accepted
-/// source the application may lend none; a draft that does not parse, or
-/// an application with no document, lends none. Reading readouts or the
-/// presentation is passive; the application reconciles readouts with the
-/// draft at its own mutation and synchronization boundaries, never in a
-/// frontend's painting. Indices are valid only within the borrow;
-/// [`ResultId`] persists as [`Readout`] states.
+/// Accepted source establishes the rows; edits move their source anchors
+/// without parsing draft declarations or obtaining values. New draft bindings
+/// gain readouts when applied. An application without an open document lends
+/// none. Reading readouts and presentation is passive; the application updates
+/// anchors at mutation and synchronization boundaries, never in frontend
+/// painting. Indices are valid only within the borrow; [`ResultId`] persists
+/// as [`Readout`] states.
 pub trait Readouts {
     /// Whether the draft is the accepted source. While it is not, every
-    /// readout shows the accepted program, which an edit anywhere in the
-    /// draft, upstream of a declaration included, may have changed, so a
-    /// frontend marks the readouts as those of the applied document.
+    /// readout retains its last applied capture. A frontend marks the
+    /// readouts as those of the applied document.
     fn applied(&self) -> bool;
     fn readout_count(&self) -> usize;
     fn readout(&self, index: usize) -> Option<Readout<'_>>;
