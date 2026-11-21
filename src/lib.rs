@@ -1803,6 +1803,15 @@ pub struct CapturedValue<'a> {
     pub name: &'a str,
     pub kinds: &'a Kinds,
     pub kind: KindRef,
+    /// The captured representation, when known. The root is valid in these
+    /// exact immutable layout tables and fits `kind` under this capture's
+    /// `kinds`. Both table/root pairs belong to the producing capture,
+    /// independently of later program changes.
+    ///
+    /// `Some` records representation, not whether content is available.
+    /// `None` performs no lookup or computation and permits no inferred
+    /// storage width. Reading this metadata retains no runtime-backed value.
+    pub layout: Option<(&'a Layouts, LayoutRef)>,
     pub version: Option<Version>,
     pub content: Option<&'a Content>,
 }
