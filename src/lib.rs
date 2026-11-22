@@ -1695,16 +1695,21 @@ pub enum Report {
 // advancement; optional rendering may not. The location of the update loop is
 // unspecified.
 //
-// Decide: what a retained value promises when its backing or its run is
-// replaced: its original contents, readable, or an explicit stale-value
-// failure, and never bytes that belong to a replacement. An activation or an
-// observation bound to an old run cannot silently reach a successor run,
-// which does not prevent the shared application from registering a retained
-// query in the new run. Whether a backing and an activation stay valid for the
-// same lifetime is settled before one identity is chosen for both: storage
-// that moves within a run need not make a control stale. Keeping original
-// values readable may instead require retaining their backing until the
-// values are released.
+// A retained value whose backing is replaced is stale: reading it fails
+// with an explicit stale-value failure, and it never yields bytes that
+// belong to a replacement. The value carries the identity of its backing,
+// which lasts as long as the backing and is never reused. Storage that
+// grows or moves within one backing keeps that identity, and a replacement
+// that fails leaves the old backing, and the values it holds, as they were.
+// Host storage belongs to the runtime and is not replaced with a backend.
+//
+// Decide: what an activation or an observation bound to an old run
+// promises when the run is replaced. One bound to an old run cannot
+// silently reach a successor run, which does not prevent the shared
+// application from registering a retained query in the new run. Whether
+// an activation and a backing stay valid for the same lifetime is settled
+// before one identity is chosen for both: storage that moves within a run
+// need not make a control stale.
 
 /// A State version within a run. Every completed update advances the version,
 /// independently of publication.
