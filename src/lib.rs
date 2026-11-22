@@ -1610,6 +1610,19 @@ pub struct MaterializationCandidate {
     pub domain: String,
     /// A concise expression notation; shared operands use graph references.
     pub expression: String,
+    /// Where the root document writes this computation: half-open byte ranges
+    /// of its accepted source text, on UTF-8 character boundaries, ordered by
+    /// start and then end, each once. Each is text the author wrote that gives
+    /// this value: an expression computing it, a name standing for it, or a
+    /// call of a function whose result it is. One computation written in
+    /// several places has several. Ranges may nest or overlap as the written
+    /// text does. A block is named by its final expression, and an authored
+    /// Array's candidate by its body. Values the compiler makes for an
+    /// expression, such as the default an Array read falls back to, are written
+    /// nowhere. Empty when the root document writes nothing for it, as for one
+    /// written only in another document. Display-only, like `expression`: never
+    /// a means of identifying the candidate.
+    pub origins: Vec<std::ops::Range<usize>>,
     /// The root in the preview's descriptive computation graph.
     pub body: u32,
     pub materialized: bool,
