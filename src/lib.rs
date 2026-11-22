@@ -1245,13 +1245,22 @@ pub enum Code {
     /// not retire its in-flight uses.
     ///
     /// Preparation preserves supplied scalar widths and written operations.
-    /// Binary32 arithmetic uses nearest-even rounding, preserves signed zero,
-    /// infinities and gradual underflow, and performs multiplies and adds
-    /// separately as written. Division and square root are correctly
-    /// rounded. The four native mathematical functions meet the
-    /// exceptional-result and within-run purity rules stated above. For
-    /// CUDA, the logarithm of a positive subnormal is finite and the
-    /// logarithm of a negative subnormal is NaN.
+    /// Binary32 and binary64 primitive arithmetic use nearest-even rounding,
+    /// preserve signed zero, infinities and gradual underflow, and perform
+    /// multiplies and adds separately as written. Division and square root
+    /// are correctly rounded. Each supported native mathematical function
+    /// meets the exceptional-result and within-run purity rules stated
+    /// above at the width of its argument and result. For CUDA, the
+    /// logarithm of a positive subnormal is finite and the logarithm of a
+    /// negative subnormal is NaN.
+    ///
+    /// Binary64 primitive operations and binary64 native mathematical
+    /// functions are separate capabilities, and the functions may be
+    /// unsupported where the primitives are supported. An operation or a
+    /// scalar width that a supplied unit requires and the profile does not
+    /// support is refused during supply or preparation, before any stage of
+    /// that unit runs. Nothing is narrowed, and no other target is
+    /// substituted.
     ///
     /// Gap: partial launches with explicit output ownership, higher ranks and
     /// bindings for regions outside the single arena.
