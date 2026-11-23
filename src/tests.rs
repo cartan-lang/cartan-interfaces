@@ -756,6 +756,42 @@ mod unit {
     }
 
     #[test]
+    fn an_alias_read_requires_the_inputs_assumed_shape() {
+        let mut tables = Tables::default();
+        let (array, layout) = tables.reals();
+        let mut input: InputPort = tables.port(array, layout, vec![at(0)], &[0]);
+        input.assumes.push(Assumed {
+            field: 0,
+            equals: ShapeRef(1),
+        });
+        let output = tables.port(array, layout, vec![at(0)], &[1]);
+        let read = Stage {
+            reads: vec![Slot(1)],
+            ..stage(&[], &[], &[])
+        };
+        let mut unit = Unit {
+            inputs: vec![input],
+            outputs: vec![output],
+            storage: vec![
+                Storage::Input(need(8, vec![at(0)])),
+                Storage::Alias(Slot(0)),
+            ],
+            shape_fields: vec![ShapeField::Domain { rank: 1 }; 2],
+            stages: vec![stage(&[], &[], &[1]), read],
+            ..tables.unit()
+        };
+        unit.clone().check().expect("producer before alias read");
+        unit.stages.swap(0, 1);
+        assert_eq!(
+            unit.check().expect_err("alias read before producer"),
+            Refusal::Defect(Defect::ShapeNotYetKnown {
+                stage: 0,
+                field: ShapeRef(1),
+            })
+        );
+    }
+
+    #[test]
     fn a_stage_is_launched_over_a_domain_the_runtime_already_holds() {
         let over = |stage: Stage, extent: ShapeEntry| Stage {
             extent: Some(extent),

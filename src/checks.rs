@@ -1341,10 +1341,13 @@ impl Unit {
                 }
             }
             for slot in &stage.reads {
-                storage(*slot)?;
-                // The runtime checks an input's assumed shape before any
-                // stage reads the input, so it is determined earlier.
-                if let Some(field) = assumes[slot.0 as usize]
+                // An alias reads the same input storage and requires the
+                // same assumed shape to have been determined.
+                let backing = match storage(*slot)? {
+                    Storage::Alias(input) => input,
+                    _ => slot,
+                };
+                if let Some(field) = assumes[backing.0 as usize]
                     .iter()
                     .find(|field| !produced[field.0 as usize])
                 {
