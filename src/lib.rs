@@ -683,9 +683,12 @@ pub enum ShapeEntry {
 /// Each slot specifies its memory, allowing a unit to combine small host
 /// values with buffers on one or more devices.
 ///
-/// Decide: device indices are local to a unit and mapped to physical devices
-/// by the runtime. Whether a description may identify a physical device
-/// directly remains unresolved.
+/// Memory names are local to a unit. Each invocation binds them to actual
+/// memory on its executor. Equal names and offsets in different instances
+/// can denote independent storage. Transfers and overlapping accesses use
+/// the identity of the actual backing.
+///
+/// Decide: whether a description may identify a physical device directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Memory {
     /// Ordinary memory of the host process.
@@ -716,7 +719,9 @@ pub struct Capacity(pub Vec<ShapeEntry>);
 /// The description declares storage requirements; compiled code does not
 /// request allocations. The runtime derives allocation sizes and supplies a
 /// [`Region`] before the first stage that writes the slot. This operation
-/// consumes exactly the shape values named by the capacity.
+/// consumes exactly the shape values named by the capacity. Capacity describes
+/// the complete logical slot. A window invocation may bind a compact view
+/// as specified by [`RankOneWindow`].
 #[derive(Clone, Debug)]
 pub struct Need {
     pub memory: Memory,
@@ -732,7 +737,8 @@ pub struct Need {
 /// Storage assigned to a slot at run time, represented by an allocation base
 /// and a byte offset. A whole allocation has offset zero.
 ///
-/// A region satisfies the slot's alignment and capacity requirements. Code
+/// A region satisfies the slot's alignment and covers its complete capacity
+/// or the local view specified by a [`RankOneWindow`]. Code
 /// must access only its assigned regions and may assume neither that a region
 /// starts at its allocation base nor that distinct slots occupy distinct
 /// allocations. Regions for distinct slots do not overlap except through
@@ -841,7 +847,82 @@ pub struct Selection {
     pub otherwise: Option<u32>,
 }
 
-/// A compiled entry point invoked in one launch. A stage is the sole
+/// Index of a shared input stencil in a unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StencilRef(pub u32);
+
+/// Inclusive bounds on the signed offsets from the output coordinate of
+/// every applicable load through the participating planes. The supplier
+/// proves this relation for the emitted computation. The port names a dense
+/// rank-one Array on a closed or periodic axis, optionally inside an Optional.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stencil {
+    pub input: u32,
+    pub min_offset: i32,
+    pub max_offset: i32,
+}
+
+/// The logical elements each site of a window entry may write in a slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteOwnership {
+    /// Arbitrary positions in the complete slot. Even one such write requires
+    /// one invocation over the complete extent, with complete writable slots.
+    Whole,
+    /// Site `g` owns and initializes elements `g*k..(g+1)*k`, with
+    /// `k = elements`. Capacity is exactly the global site count times `k`.
+    /// A published plane must belong to a rank-one Array on a closed or
+    /// periodic axis, possibly inside an outer Optional, with one plane
+    /// element per site. Other published structures can use whole writes.
+    BySite { elements: core::num::NonZeroU32 },
+}
+
+/// An entry equivalent to whole execution over every valid disjoint cover
+/// of its dense finite rank-one extent and every valid binding of the same
+/// captured inputs. The entry determines no shapes. Global domains stay
+/// intact. For window start `a`, count `n`, and extent `E`, the runtime
+/// checks `a <= E` and `n <= E-a`. Each local site `t < n` uses global
+/// ordinal `a+t` and writes its by-site elements starting at local `t*k`.
+/// Valid bindings meet target address-width and alignment requirements
+/// using checked element and byte arithmetic.
+/// An empty window needs no invocation.
+///
+/// The supplier qualifies coordinate arithmetic for all participating
+/// inputs and outputs. Source arithmetic, including wrapping, precedes
+/// normalization against the actual input domain. When geometries differ
+/// or a narrow offset proof does not apply, bind the full input within that
+/// same coordinate profile. A closed miss or empty domain retains its
+/// language meaning. A present site missing from local storage requires a
+/// valid binding before execution.
+///
+/// A compact input arc of distinct ordinals starts at `s` in an input of
+/// extent `e`. For a normalized hit `g`, the local ordinal is `g-s`, or
+/// `e-(s-g)` when a periodic arc wraps and `g<s`. The binder establishes
+/// that each reachable hit is in the arc. A complete arc starts at zero,
+/// as does an empty arc. All applicable planes sharing a stencil bind the
+/// same logical arc with their own region, stride and alignment. Aliases
+/// refer to the same backing plane. If a use requires a complete view,
+/// widen every applicable plane sharing its stencil and every other use
+/// of the same canonical plane to a consistent complete view. Each binding
+/// must supply the captured content required through that slot.
+///
+/// Binding follows existing demand and Optional presence. A stencil entry
+/// consumes its input domain and any enclosing presence when dynamic,
+/// either directly or through a verified shape assumption. Inapplicable
+/// descriptors use zero words without accessing storage. Each authoritative
+/// output plane covers its applicable sites exactly once. An applicable
+/// empty plane retains its backing identity.
+#[derive(Clone, Debug)]
+pub struct RankOneWindow {
+    /// One item per stage read. `None` supplies a contiguous complete slot
+    /// from ordinal zero, including previously partitioned scratch. A
+    /// stencil reads one of its input port's planes directly or by alias.
+    pub reads: Vec<Option<StencilRef>>,
+    /// One discipline per stage write, including scratch. Repeated entries
+    /// for a slot must agree.
+    pub writes: Vec<WriteOwnership>,
+}
+
+/// A compiled entry point. Each invocation is one launch. A stage is the sole
 /// execution boundary in this contract: the runtime launches it, and it runs
 /// to completion without calling the runtime.
 ///
@@ -851,10 +932,10 @@ pub struct Selection {
 /// stages.
 ///
 /// Launching consecutive stages need not require additional runtime work.
-/// Storage is provided only when the next stage writes a slot not yet
-/// provisioned. The runtime waits for an earlier stage only when it must
-/// itself read a result of that stage. Computations that fit in one launch
-/// may, but need not, form one stage.
+/// A slot's logical capacity becomes available before it is first written.
+/// Each invocation must have its valid local reads, writable regions and
+/// shape values. Transfers and overlapping physical accesses preserve stage
+/// order. Computations that fit in one launch may, but need not, form one stage.
 ///
 /// A stage consumes only values produced by bound inputs or earlier stages.
 /// This rule applies equally to storage contents and shape values.
@@ -923,6 +1004,10 @@ pub struct Stage {
     /// launch with no sites, as for a stage that only determines shape values.
     /// A shape value named here is also among `uses`.
     pub extent: Option<ShapeEntry>,
+    /// Opt in to the rank-one window calling convention. With `None` the
+    /// stage keeps its whole-stage frame and all writes have whole ownership.
+    /// An executor without support must refuse the unit before any submission.
+    pub window: Option<RankOneWindow>,
 }
 
 /// A compiled computation's runtime description.
@@ -940,8 +1025,11 @@ pub struct Stage {
 /// and from those currently covered by storage. A port's domain always
 /// denotes the value's domain.
 ///
-/// Gap: requested sites and storage coverage smaller than the whole domain
-/// are unspecified.
+/// [`RankOneWindow`] describes compact contiguous or periodic views for
+/// dense finite rank-one work. A whole-stage read binds the complete
+/// contiguous slot starting at ordinal zero, including after split writes.
+///
+/// Gap: other partial-domain profiles.
 ///
 /// Scalar results, Array fills, multi-stage updates and fused kernels use the
 /// same description, differing only in ports, slots and stages. Update and
@@ -962,6 +1050,8 @@ pub struct Unit {
     pub storage: Vec<Storage>,
     /// Unique declarations of shape values not fixed at compile time.
     pub shape_fields: Vec<ShapeField>,
+    /// Input stencils shared by stages and planes.
+    pub stencils: Vec<Stencil>,
     /// Stages in a valid execution order.
     pub stages: Vec<Stage>,
 }
@@ -973,10 +1063,21 @@ pub enum Target {
     Cuda,
 }
 
+/// Word indices in a window entry's frame suffix. The runtime supplies
+/// output first ordinal and count, then the packed start ordinal for each
+/// distinct read stencil in first read-occurrence order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowFrame {
+    pub first: u32,
+    pub count: u32,
+    pub starts: Vec<(StencilRef, u32)>,
+}
+
 /// A stage's launch arguments as a sequence of words: regions followed by
-/// shape values. [`Stage::frame`] derives this sequence.
+/// shape values and, for a window entry, its [`WindowFrame`] suffix.
+/// [`Stage::frame`] derives this sequence for both supplier and runtime.
 ///
-/// Words appear in read-slot order, write-slot order, consumed-shape order
+/// Prefix words appear in read-slot order, write-slot order, consumed-shape order
 /// and produced-shape order. Each slot occupies one word locating its region.
 /// Presence occupies one word, either 0 or 1; length occupies one word; a
 /// domain occupies two words per axis, origin followed by extent.
@@ -987,10 +1088,12 @@ pub enum Target {
 /// code must not read through them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-    /// The slots, in frame order. Slot `i` is at word `i`.
+    /// Slots in frame order. Entry `i` locates its region at word `i`.
     pub slots: Vec<Slot>,
     /// Shape references and their starting word indices, in frame order.
     pub shapes: Vec<(ShapeRef, u32)>,
+    /// Suffix indices for a window entry.
+    pub window: Option<WindowFrame>,
     /// The frame's word count.
     pub words: u32,
 }
@@ -1168,12 +1271,8 @@ pub enum Code {
     /// apply from shape values, never by testing a region word.
     ///
     /// A stage with an extent is still one call: the function visits every
-    /// site itself.
-    ///
-    /// Gap: a stage cannot be launched over part of its extent, as running
-    /// it on several cores would need. The extent in the frame is the shape
-    /// value the code also takes addresses from, so a range of sites to
-    /// visit would have to be stated apart from it.
+    /// site of the supplied window or, for a whole-stage entry, the entire
+    /// extent itself.
     Wasm(Vec<u8>),
     /// Metal Shading Language source, compiled by the runtime with fast
     /// math disabled, so that each operation is done as written. Its native
@@ -1196,7 +1295,8 @@ pub enum Code {
     /// whose position lies outside the extent does nothing, so a runtime may
     /// round the grid up. A stage with no extent is dispatched with one
     /// thread. How threads are grouped is the runtime's choice, and a kernel
-    /// does not depend on it.
+    /// does not depend on it. For a window entry the first dimension covers
+    /// its local count, and each local position is bounded by that count.
     ///
     /// A stage that determines shape values writes them into its frame, where
     /// the runtime reads them once the stage has completed. Scalars are those
@@ -1229,13 +1329,14 @@ pub enum Code {
     /// by selecting or aliasing existing storage requires no kernel or
     /// allocation of its own.
     ///
-    /// A nonempty extent is visited in full in one launch. Each site executes
+    /// A whole-stage entry visits a nonempty extent in full in one launch.
+    /// A window entry instead uses its local count as its grid-stride bound. Each site executes
     /// exactly once. Different sites write disjoint bytes. This profile
     /// admits lengths and rank-one or rank-two domains. The x dimension
     /// corresponds to a length or the last domain axis, and y to the first
     /// axis of a rank-two domain. Unused block and grid dimensions are one.
     /// Any legal positive physical dimensions on the active axes must cover
-    /// the full logical extent, including a grid smaller than the extent and
+    /// the assigned sites, including a grid smaller than the extent and
     /// padding outside it. Domain origins are signed 64-bit values. Extents
     /// and site offsets are unsigned 64-bit values.
     ///
@@ -1262,8 +1363,7 @@ pub enum Code {
     /// that unit runs. Nothing is narrowed, and no other target is
     /// substituted.
     ///
-    /// Gap: partial launches with explicit output ownership, higher ranks and
-    /// bindings for regions outside the single arena.
+    /// Gap: higher ranks and bindings for regions outside the single arena.
     Cuda(String),
 }
 
@@ -1294,8 +1394,8 @@ pub enum Defect {
     /// A shape value has more than one producer: two stages, or a stage and
     /// an input.
     ShapeProducedTwice(ShapeRef),
-    /// A stage writes part of a result without using a shape value that
-    /// governs that part.
+    /// A stage omits a shape dependency of a result plane it writes or a
+    /// stencil input it reads.
     GoverningShapeUnused {
         stage: u32,
         field: ShapeRef,
@@ -1313,6 +1413,31 @@ pub enum Defect {
     /// A stage is launched over a shape value it does not list among its
     /// uses, so its code could not find the extent in its frame.
     ExtentUnused(u32),
+    /// The stage's frame cannot be indexed and counted in u32 words.
+    FrameTooLarge(u32),
+    /// A stencil has reversed bounds or an incompatible or missing input.
+    InvalidStencil(StencilRef),
+    /// A window needs a rank-one domain extent and cannot determine shapes.
+    WindowExtent(u32),
+    /// Window read and write lists must correspond to the stage's lists.
+    WindowArity(u32),
+    /// The reference is missing, or the slot is not a plane of its input.
+    StencilRead {
+        stage: u32,
+        slot: Slot,
+        stencil: StencilRef,
+    },
+    /// The declared access does not agree with the slot's logical capacity
+    /// or its published Array plane.
+    WindowCapacity {
+        stage: u32,
+        slot: Slot,
+    },
+    /// Repeated entries give a writable slot different ownership.
+    WindowWriteConflict {
+        stage: u32,
+        slot: Slot,
+    },
     /// A stage with an extent lists a slot among both its reads and its
     /// writes, so one site could read what the stage writes at another.
     ReadsWhatItWrites {

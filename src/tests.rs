@@ -537,6 +537,7 @@ mod unit {
             uses: fields(uses),
             determines: fields(determines),
             extent: None,
+            window: None,
         }
     }
 
@@ -1342,6 +1343,350 @@ mod unit {
             bounded.consumers(count),
             [Consumer::Stage(1), Consumer::Result(0)]
         );
+    }
+
+    fn by_site(elements: u32) -> WriteOwnership {
+        WriteOwnership::BySite {
+            elements: elements.try_into().unwrap(),
+        }
+    }
+
+    /// One input Array and one result Array share a dynamic periodic domain.
+    fn window_unit() -> Unit {
+        let mut tables = Tables::default();
+        let element = tables.kinds.fiber(Fiber::Real);
+        let array = tables.kinds.define(Kind::Array {
+            element,
+            axes: vec![AxisKind::Periodic],
+        });
+        let real = tables.layouts.define(Layout::Scalar(Scalar::F64));
+        let layout = tables.layouts.define(Layout::Array(real));
+        Unit {
+            inputs: vec![tables.port(array, layout, vec![at(0)], &[0])],
+            outputs: vec![tables.port(array, layout, vec![at(0)], &[1])],
+            storage: vec![
+                Storage::Input(need(8, vec![at(0)])),
+                Storage::Output(need(8, vec![at(0)])),
+            ],
+            shape_fields: vec![ShapeField::Domain { rank: 1 }],
+            stencils: vec![Stencil {
+                input: 0,
+                min_offset: -1,
+                max_offset: 1,
+            }],
+            stages: vec![Stage {
+                reads: vec![Slot(0)],
+                extent: Some(at(0)),
+                window: Some(RankOneWindow {
+                    reads: vec![Some(StencilRef(0))],
+                    writes: vec![by_site(1)],
+                }),
+                ..stage(&[1], &[0], &[])
+            }],
+            ..tables.unit()
+        }
+    }
+
+    #[test]
+    fn window_frames_preserve_the_prefix_and_share_starts_in_read_order() {
+        let frame = |unit: Unit| {
+            let checked = unit.check().unwrap();
+            let unit = checked.unit();
+            unit.stages[0].frame(&unit.shape_fields)
+        };
+        let mut unit = window_unit();
+        let stencil = StencilRef(0);
+        let compact = frame(unit.clone());
+        assert_eq!(compact.slots, [Slot(0), Slot(1)]);
+        assert_eq!(compact.shapes, [(ShapeRef(0), 2)]);
+        assert_eq!(compact.words, 7);
+        assert_eq!(
+            compact.window,
+            Some(WindowFrame {
+                first: 4,
+                count: 5,
+                starts: vec![(stencil, 6)]
+            })
+        );
+
+        // A second product plane and an alias of the first share the same
+        // input. Descriptor 1 occurs first, even though its index is larger.
+        let real = unit.kinds.fiber(Fiber::Real);
+        let int = unit.kinds.fiber(Fiber::Int);
+        let product = unit
+            .kinds
+            .fiber(Fiber::Product(vec![("x".into(), real), ("n".into(), int)]));
+        unit.inputs[0].kind = unit.kinds.define(Kind::Array {
+            element: product,
+            axes: vec![AxisKind::Closed],
+        });
+        let wide = unit.layouts.define(Layout::Scalar(Scalar::F64));
+        let narrow = unit.layouts.define(Layout::Scalar(Scalar::I32));
+        let parts = unit
+            .layouts
+            .define(Layout::Group(vec![part(wide, 0, 0), part(narrow, 1, 0)]));
+        unit.inputs[0].layout = unit.layouts.define(Layout::Array(parts));
+        unit.inputs[0].planes.push(Slot(2));
+        unit.storage.extend([
+            Storage::Input(need(4, vec![at(0)])),
+            Storage::Alias(Slot(0)),
+        ]);
+        unit.stencils.push(Stencil {
+            input: 0,
+            min_offset: -2,
+            max_offset: 0,
+        });
+        unit.stages[0].reads = vec![Slot(0), Slot(3), Slot(2)];
+        let first = StencilRef(1);
+        unit.stages[0].window.as_mut().unwrap().reads =
+            vec![Some(first), Some(stencil), Some(first)];
+        let shared = frame(unit.clone());
+        assert_eq!(shared.words, 10);
+        assert_eq!(
+            shared.window,
+            Some(WindowFrame {
+                first: 6,
+                count: 7,
+                starts: vec![(first, 8), (stencil, 9)]
+            })
+        );
+        unit.stages[0].window.as_mut().unwrap().reads[1] = None;
+        assert_eq!(frame(unit.clone()).words, 9);
+        unit.stages[0].window.as_mut().unwrap().reads.fill(None);
+        assert_eq!(
+            frame(unit.clone()).window,
+            Some(WindowFrame {
+                first: 6,
+                count: 7,
+                starts: vec![]
+            })
+        );
+        unit.stages[0].window = None;
+        let whole = frame(unit);
+        assert_eq!(whole.slots, shared.slots);
+        assert_eq!(whole.shapes, shared.shapes);
+        assert_eq!(whole.words, 6);
+        assert_eq!(whole.window, None);
+        assert!(Unit::default().stencils.is_empty());
+        assert!(Stage::default().window.is_none());
+    }
+
+    #[test]
+    fn unrepresentable_shape_words_and_window_suffixes_are_refused() {
+        let size = |rank| Unit {
+            shape_fields: vec![ShapeField::Domain { rank }],
+            stages: vec![stage(&[], &[], &[0])],
+            ..Unit::default()
+        };
+        assert_eq!(
+            size(usize::MAX).check().defect(),
+            Some(Defect::FrameTooLarge(0))
+        );
+        let mut unit = size((u32::MAX / 2) as usize);
+        unit.stages.push(Stage {
+            extent: Some(cells(1)),
+            ..stage(&[], &[0], &[])
+        });
+        unit.clone().check().expect("the legacy prefix fits");
+        unit.stages[1].window = Some(RankOneWindow {
+            reads: vec![],
+            writes: vec![],
+        });
+        assert_eq!(unit.check().defect(), Some(Defect::FrameTooLarge(1)));
+    }
+
+    #[test]
+    fn window_stencils_require_matching_port_plane_domain_and_entry() {
+        let refused = |change: fn(&mut Unit), defect| {
+            let mut unit = window_unit();
+            change(&mut unit);
+            assert_eq!(unit.check().defect(), Some(defect));
+        };
+        let stencil = StencilRef(0);
+        refused(
+            |u| u.stencils[0].min_offset = 2,
+            Defect::InvalidStencil(stencil),
+        );
+        refused(|u| u.stencils[0].input = 1, Defect::InvalidStencil(stencil));
+        let read = Defect::StencilRead {
+            stage: 0,
+            slot: Slot(0),
+            stencil: StencilRef(0),
+        };
+        refused(|u| u.stencils.clear(), read);
+        refused(
+            |u| {
+                u.storage.push(Storage::Input(need(8, vec![at(0)])));
+                let mut other = u.inputs[0].clone();
+                other.planes = vec![Slot(2)];
+                u.inputs.push(other);
+                u.stencils[0].input = 1;
+            },
+            read,
+        );
+        refused(
+            |u| u.stages[0].window.as_mut().unwrap().reads.clear(),
+            Defect::WindowArity(0),
+        );
+        refused(
+            |u| u.stages[0].window.as_mut().unwrap().writes.clear(),
+            Defect::WindowArity(0),
+        );
+        refused(
+            |u| u.stages[0].extent = Some(ShapeEntry::Fixed(ShapeValue::Length(7))),
+            Defect::WindowExtent(0),
+        );
+        refused(|u| u.stages[0].extent = None, Defect::WindowExtent(0));
+        refused(
+            |u| {
+                u.shape_fields.push(ShapeField::Length);
+                u.stages[0].determines.push(ShapeRef(1));
+            },
+            Defect::WindowExtent(0),
+        );
+
+        for axes in [
+            vec![AxisKind::Open],
+            vec![AxisKind::Closed, AxisKind::Periodic],
+        ] {
+            let mut unit = window_unit();
+            let element = unit.kinds.fiber(Fiber::Real);
+            let rank = axes.len();
+            unit.inputs[0].kind = unit.kinds.define(Kind::Array { element, axes });
+            unit.inputs[0].shape = vec![ShapeEntry::Fixed(ShapeValue::Domain(vec![
+                Axis {
+                    origin: 0,
+                    extent: 4
+                };
+                rank
+            ]))];
+            assert_eq!(unit.check().defect(), Some(Defect::InvalidStencil(stencil)));
+        }
+        refused(
+            |u| {
+                let real = u.kinds.fiber(Fiber::Real);
+                u.inputs[0].kind = u.kinds.define(Kind::Fiber(real));
+                u.inputs[0].layout = u.layouts.define(Layout::Scalar(Scalar::F64));
+                u.inputs[0].shape.clear();
+            },
+            Defect::InvalidStencil(stencil),
+        );
+        refused(
+            |u| {
+                u.shape_fields.push(ShapeField::Domain { rank: 1 });
+                u.inputs[0].shape = vec![at(1)];
+                u.storage[0] = Storage::Input(need(8, vec![at(1)]));
+                u.stages.insert(0, stage(&[], &[], &[0]));
+            },
+            Defect::GoverningShapeUnused {
+                stage: 1,
+                field: ShapeRef(1),
+            },
+        );
+    }
+
+    #[test]
+    fn optional_stencil_aliases_require_presence_and_existing_shape_assumptions() {
+        let mut unit = window_unit();
+        unit.inputs[0].kind = unit.kinds.define(Kind::Optional(unit.inputs[0].kind));
+        unit.inputs[0].layout = unit.layouts.define(Layout::Optional(unit.inputs[0].layout));
+        unit.inputs[0].shape.insert(0, at(1));
+        unit.shape_fields.push(ShapeField::Presence);
+        let missing = Defect::GoverningShapeUnused {
+            stage: 0,
+            field: ShapeRef(1),
+        };
+        assert_eq!(unit.clone().check().defect(), Some(missing));
+        unit.stages[0].uses.push(ShapeRef(1));
+        unit.clone().check().unwrap();
+
+        unit.storage.push(Storage::Alias(Slot(0)));
+        unit.stages[0].reads[0] = Slot(2);
+        unit.inputs[0].assumes.push(Assumed {
+            field: 1,
+            equals: ShapeRef(2),
+        });
+        unit.shape_fields.push(ShapeField::Domain { rank: 1 });
+        unit.stages.push(stage(&[], &[], &[2]));
+        let late = Defect::ShapeNotYetKnown {
+            stage: 0,
+            field: ShapeRef(2),
+        };
+        assert_eq!(unit.clone().check().defect(), Some(late));
+        unit.stages.swap(0, 1);
+        unit.check().unwrap();
+    }
+
+    #[test]
+    fn by_site_capacity_requires_the_right_domain_and_exact_fixed_multiplier() {
+        let mut unit = window_unit();
+        unit.storage[0] = Storage::Input(need(8, vec![at(0), cells(2)]));
+        let wrong = |slot| {
+            Some(Defect::WindowCapacity {
+                stage: 0,
+                slot: Slot(slot),
+            })
+        };
+        assert_eq!(unit.check().defect(), wrong(0));
+
+        let mut unit = window_unit();
+        unit.storage
+            .push(Storage::Scratch(need(4, vec![cells(2), at(0), cells(3)])));
+        unit.stages[0].writes.push(Slot(2));
+        unit.stages[0]
+            .window
+            .as_mut()
+            .unwrap()
+            .writes
+            .push(by_site(6));
+        unit.clone().check().unwrap();
+        // Both write disciplines are valid together; Whole requires full dispatch.
+        unit.stages[0].window.as_mut().unwrap().writes[1] = WriteOwnership::Whole;
+        unit.clone().check().unwrap();
+        unit.stages[0].window.as_mut().unwrap().writes[1] = by_site(6);
+        for factors in [
+            vec![at(0), cells(5)],
+            vec![at(0), at(0)],
+            vec![cells(6)],
+            vec![at(0), cells(u64::MAX), cells(2)],
+        ] {
+            unit.storage[2] = Storage::Scratch(need(4, factors));
+            assert_eq!(unit.clone().check().defect(), wrong(2));
+        }
+        unit.storage[2] = Storage::Scratch(need(4, vec![at(0), cells(6)]));
+        unit.stages[0].writes.push(Slot(2));
+        unit.stages[0]
+            .window
+            .as_mut()
+            .unwrap()
+            .writes
+            .push(WriteOwnership::Whole);
+        assert_eq!(
+            unit.clone().check().defect(),
+            Some(Defect::WindowWriteConflict {
+                stage: 0,
+                slot: Slot(2)
+            })
+        );
+        unit.stages[0].window.as_mut().unwrap().writes[2] = by_site(6);
+        unit.clone().check().unwrap();
+        // Even when the slot has enough capacity, a published Array has one
+        // logical plane element per global site.
+        unit.stages[0].window.as_mut().unwrap().writes[0] = by_site(2);
+        unit.storage[1] = Storage::Output(need(8, vec![at(0), cells(2)]));
+        assert_eq!(unit.check().defect(), wrong(1));
+
+        let mut fixed = window_unit();
+        fixed.inputs[0].shape = vec![cells(7)];
+        fixed.outputs[0].shape = vec![cells(7)];
+        fixed.stages[0].extent = Some(cells(7));
+        fixed.stages[0].uses.clear();
+        let seven = ShapeEntry::Fixed(ShapeValue::Length(7));
+        fixed.storage[0] = Storage::Input(need(8, vec![seven.clone()]));
+        fixed.storage[1] = Storage::Output(need(8, vec![seven.clone()]));
+        fixed.clone().check().unwrap();
+        fixed.outputs[0].shape[0] = cells(8);
+        assert_eq!(fixed.check().defect(), wrong(1));
     }
 
     #[test]

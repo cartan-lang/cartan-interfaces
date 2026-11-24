@@ -1020,36 +1020,220 @@ impl Governed<'_> {
 }
 
 impl ShapeField {
-    /// The word count for this shape-field category in a [`Frame`].
-    pub fn words(self) -> u32 {
+    fn checked_words(self) -> Option<u32> {
         match self {
-            ShapeField::Presence | ShapeField::Length | ShapeField::EncodedLength => 1,
-            ShapeField::Domain { rank } => 2 * rank as u32,
+            ShapeField::Presence | ShapeField::Length | ShapeField::EncodedLength => Some(1),
+            ShapeField::Domain { rank } => u32::try_from(rank).ok()?.checked_mul(2),
         }
+    }
+
+    /// The word count for a representable shape-field category in a [`Frame`].
+    pub fn words(self) -> u32 {
+        self.checked_words().expect("shape fits a frame")
     }
 }
 
 impl Stage {
-    /// Derive the launch frame from the unit's shape-field table. All
-    /// referenced slots and shape values must exist, as guaranteed by a
-    /// checked unit.
+    /// Derive the launch frame from the unit's shape-field table. The
+    /// referenced shapes and the frame's word count must be valid, as
+    /// guaranteed by a checked unit.
     pub fn frame(&self, shape_fields: &[ShapeField]) -> Frame {
-        let slots: Vec<Slot> = self.reads.iter().chain(&self.writes).copied().collect();
-        let mut words = slots.len() as u32;
+        self.checked_frame(shape_fields)
+            .expect("checked stage frame")
+    }
+
+    fn checked_frame(&self, shape_fields: &[ShapeField]) -> Option<Frame> {
+        let prefix = self.reads.len().checked_add(self.writes.len())?;
+        let mut words = u32::try_from(prefix).ok()?;
+        let slots = self.reads.iter().chain(&self.writes).copied().collect();
         let mut shapes = Vec::new();
         for shape in self.uses.iter().chain(&self.determines) {
             shapes.push((*shape, words));
-            words += shape_fields[shape.0 as usize].words();
+            let field = shape_fields.get(shape.0 as usize)?;
+            words = words.checked_add(field.checked_words()?)?;
         }
-        Frame {
+        let mut suffix = None;
+        if let Some(window) = &self.window {
+            let first = words;
+            words = words.checked_add(2)?;
+            let mut starts = Vec::new();
+            let mut seen = HashSet::new();
+            for &stencil in window.reads.iter().flatten() {
+                if seen.insert(stencil) {
+                    starts.push((stencil, words));
+                    words = words.checked_add(1)?;
+                }
+            }
+            suffix = Some(WindowFrame {
+                first,
+                count: first + 1,
+                starts,
+            });
+        }
+        Some(Frame {
             slots,
             shapes,
+            window: suffix,
             words,
+        })
+    }
+}
+
+impl Capacity {
+    /// Prove equality to one domain count times a fixed multiplier. A
+    /// dynamic factor must be the very same domain, exactly once.
+    fn matches_sites(&self, domain: &ShapeEntry, elements: u32) -> bool {
+        let mut dynamic = None;
+        let mut product = 1u64;
+        for factor in &self.0 {
+            match factor {
+                ShapeEntry::Runtime(field) => {
+                    if dynamic.replace(*field).is_some() {
+                        return false;
+                    }
+                }
+                ShapeEntry::Fixed(value) => {
+                    let Some(next) = value.count().and_then(|count| product.checked_mul(count))
+                    else {
+                        return false;
+                    };
+                    product = next;
+                }
+            }
+        }
+        let elements = u64::from(elements);
+        match domain {
+            ShapeEntry::Runtime(field) => dynamic == Some(*field) && product == elements,
+            ShapeEntry::Fixed(value) => {
+                dynamic.is_none()
+                    && value.count().and_then(|sites| sites.checked_mul(elements)) == Some(product)
+            }
         }
     }
 }
 
 impl Unit {
+    /// The global domain of a checked rank-one Array port, optionally
+    /// enclosed in an Optional. Other structures cannot be stencil inputs.
+    fn window_domain<'a>(&self, kind: KindRef, shape: &'a [ShapeEntry]) -> Option<&'a ShapeEntry> {
+        let (kind, fields) = match self.kinds.get(kind)? {
+            Kind::Optional(inner) => (self.kinds.get(*inner)?, shape.get(1..)?),
+            other => (other, shape),
+        };
+        match (kind, fields) {
+            (Kind::Array { axes, .. }, [domain])
+                if matches!(axes.as_slice(), [AxisKind::Closed | AxisKind::Periodic]) =>
+            {
+                Some(domain)
+            }
+            _ => None,
+        }
+    }
+
+    fn check_stencil_read(
+        &self,
+        index: u32,
+        stage: &Stage,
+        slot: Slot,
+        stencil: StencilRef,
+    ) -> Result<(), Defect> {
+        let mismatch = Defect::StencilRead {
+            stage: index,
+            slot,
+            stencil,
+        };
+        let descriptor = self.stencils.get(stencil.0 as usize).ok_or(mismatch)?;
+        let port = &self.inputs[descriptor.input as usize];
+        let backing = match self.storage[slot.0 as usize] {
+            Storage::Alias(input) => input,
+            _ => slot,
+        };
+        if !port.planes.contains(&backing) {
+            return Err(mismatch);
+        }
+        let Storage::Input(need) = &self.storage[backing.0 as usize] else {
+            return Err(mismatch);
+        };
+        let domain = self.window_domain(port.kind, &port.shape).ok_or(mismatch)?;
+        if !need.capacity.matches_sites(domain, 1) {
+            return Err(Defect::WindowCapacity { stage: index, slot });
+        }
+        // The entry can consume the original field or a declared
+        // equality verified before reading the backing input.
+        for (at, entry) in port.shape.iter().enumerate() {
+            let ShapeEntry::Runtime(field) = entry else {
+                continue;
+            };
+            let assumed = port.assumes.iter().any(|assumed| {
+                assumed.field as usize == at && stage.uses.contains(&assumed.equals)
+            });
+            if !stage.uses.contains(field) && !assumed {
+                return Err(Defect::GoverningShapeUnused {
+                    stage: index,
+                    field: *field,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn check_window(
+        &self,
+        index: u32,
+        stage: &Stage,
+        window: &RankOneWindow,
+    ) -> Result<(), Defect> {
+        if stage.reads.len() != window.reads.len() || stage.writes.len() != window.writes.len() {
+            return Err(Defect::WindowArity(index));
+        }
+        let extent = stage.extent.as_ref().ok_or(Defect::WindowExtent(index))?;
+        let rank_one = match extent {
+            ShapeEntry::Fixed(value) => value.is(ShapeField::Domain { rank: 1 }),
+            ShapeEntry::Runtime(field) => {
+                self.shape_fields[field.0 as usize] == ShapeField::Domain { rank: 1 }
+            }
+        };
+        if !rank_one || !stage.determines.is_empty() {
+            return Err(Defect::WindowExtent(index));
+        }
+        for (&slot, &stencil) in stage.reads.iter().zip(&window.reads) {
+            if let Some(stencil) = stencil {
+                self.check_stencil_read(index, stage, slot, stencil)?;
+            }
+        }
+        let mut seen = HashMap::new();
+        for (&slot, &ownership) in stage.writes.iter().zip(&window.writes) {
+            if let Some(previous) = seen.insert(slot.0, ownership) {
+                if previous != ownership {
+                    return Err(Defect::WindowWriteConflict { stage: index, slot });
+                }
+                continue;
+            }
+            let WriteOwnership::BySite { elements } = ownership else {
+                continue;
+            };
+            let (Storage::Output(need) | Storage::Scratch(need)) = &self.storage[slot.0 as usize]
+            else {
+                return Err(Defect::WritesShared { stage: index, slot });
+            };
+            let defect = Defect::WindowCapacity { stage: index, slot };
+            if !need.capacity.matches_sites(extent, elements.get()) {
+                return Err(defect);
+            }
+            for port in self
+                .outputs
+                .iter()
+                .filter(|port| port.planes.contains(&slot))
+            {
+                let domain = self.window_domain(port.kind, &port.shape).ok_or(defect)?;
+                if elements.get() != 1 || !need.capacity.matches_sites(domain, 1) {
+                    return Err(defect);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Validate the description's structure and supported representations.
     pub fn check(self) -> Result<Checked, Refusal> {
         match self.well_formed() {
@@ -1233,6 +1417,16 @@ impl Unit {
             owed.extend(applies.filter_map(runtime));
         }
 
+        for (index, stencil) in self.stencils.iter().enumerate() {
+            let defect = Defect::InvalidStencil(StencilRef(index as u32));
+            let port = self.inputs.get(stencil.input as usize).ok_or(defect)?;
+            if stencil.min_offset > stencil.max_offset
+                || self.window_domain(port.kind, &port.shape).is_none()
+            {
+                return Err(defect);
+            }
+        }
+
         // Selections require compatible input kinds and identical layouts.
         for (index, selection) in self.selected.iter().enumerate() {
             let at = PortRef::Selected(index as u32);
@@ -1382,11 +1576,17 @@ impl Unit {
                     }
                 }
             }
+            if let Some(window) = &stage.window {
+                self.check_window(index, stage, window)?;
+            }
             for field in &stage.determines {
                 if std::mem::replace(&mut produced[place(field)?], true) {
                     return Err(Defect::ShapeProducedTwice(*field));
                 }
             }
+            stage
+                .checked_frame(&self.shape_fields)
+                .ok_or(Defect::FrameTooLarge(index))?;
         }
         match owed.into_iter().find(|field| !produced[field.0 as usize]) {
             Some(field) => Err(Defect::ResultShapeUnknown(field)),
