@@ -1113,6 +1113,14 @@ impl Capacity {
 }
 
 impl Unit {
+    fn is_rank_one_domain(&self, shape: &ShapeEntry) -> bool {
+        let domain = ShapeField::Domain { rank: 1 };
+        match shape {
+            ShapeEntry::Fixed(value) => value.is(domain),
+            ShapeEntry::Runtime(field) => self.shape_fields.get(field.0 as usize) == Some(&domain),
+        }
+    }
+
     /// The global domain of a checked rank-one Array port, optionally
     /// enclosed in an Optional. Other structures cannot be stencil inputs.
     fn window_domain<'a>(&self, kind: KindRef, shape: &'a [ShapeEntry]) -> Option<&'a ShapeEntry> {
@@ -1136,6 +1144,7 @@ impl Unit {
         stage: &Stage,
         slot: Slot,
         stencil: StencilRef,
+        latest_writers: &[Option<&Stage>],
     ) -> Result<(), Defect> {
         let mismatch = Defect::StencilRead {
             stage: index,
@@ -1143,29 +1152,51 @@ impl Unit {
             stencil,
         };
         let descriptor = self.stencils.get(stencil.0 as usize).ok_or(mismatch)?;
-        let port = &self.inputs[descriptor.input as usize];
         let backing = match self.storage[slot.0 as usize] {
             Storage::Alias(input) => input,
             _ => slot,
         };
-        if !port.planes.contains(&backing) {
-            return Err(mismatch);
-        }
-        let Storage::Input(need) = &self.storage[backing.0 as usize] else {
-            return Err(mismatch);
+        let at = backing.0 as usize;
+        let (need, domain, port) = match (&descriptor.source, &self.storage[at]) {
+            (StencilSource::Input(input), Storage::Input(need)) => {
+                let port = &self.inputs[*input as usize];
+                if !port.planes.contains(&backing) {
+                    return Err(mismatch);
+                }
+                let domain = self.window_domain(port.kind, &port.shape).ok_or(mismatch)?;
+                (need, domain, Some(port))
+            }
+            (StencilSource::Scratch { domain, .. }, Storage::Scratch(need)) => {
+                let writer = latest_writers[at].ok_or(mismatch)?;
+                let window = writer.window.as_ref().ok_or(mismatch)?;
+                let by_site = writer
+                    .writes
+                    .iter()
+                    .zip(&window.writes)
+                    .find_map(|(&slot, &ownership)| (slot == backing).then_some(ownership));
+                if writer.extent.as_ref() != Some(domain)
+                    || !matches!(by_site, Some(WriteOwnership::BySite { elements }) if elements.get() == 1)
+                {
+                    return Err(mismatch);
+                }
+                (need, domain, None)
+            }
+            _ => return Err(mismatch),
         };
-        let domain = self.window_domain(port.kind, &port.shape).ok_or(mismatch)?;
         if !need.capacity.matches_sites(domain, 1) {
             return Err(Defect::WindowCapacity { stage: index, slot });
         }
-        // The entry can consume the original field or a declared
-        // equality verified before reading the backing input.
-        for (at, entry) in port.shape.iter().enumerate() {
+        // Only an input port can substitute a verified equality for one of
+        // its shape fields.
+        let shape = port.map_or(std::slice::from_ref(domain), |port| port.shape.as_slice());
+        for (at, entry) in shape.iter().enumerate() {
             let ShapeEntry::Runtime(field) = entry else {
                 continue;
             };
-            let assumed = port.assumes.iter().any(|assumed| {
-                assumed.field as usize == at && stage.uses.contains(&assumed.equals)
+            let assumed = port.is_some_and(|port| {
+                port.assumes.iter().any(|assumed| {
+                    assumed.field as usize == at && stage.uses.contains(&assumed.equals)
+                })
             });
             if !stage.uses.contains(field) && !assumed {
                 return Err(Defect::GoverningShapeUnused {
@@ -1182,23 +1213,18 @@ impl Unit {
         index: u32,
         stage: &Stage,
         window: &RankOneWindow,
+        latest_writers: &[Option<&Stage>],
     ) -> Result<(), Defect> {
         if stage.reads.len() != window.reads.len() || stage.writes.len() != window.writes.len() {
             return Err(Defect::WindowArity(index));
         }
         let extent = stage.extent.as_ref().ok_or(Defect::WindowExtent(index))?;
-        let rank_one = match extent {
-            ShapeEntry::Fixed(value) => value.is(ShapeField::Domain { rank: 1 }),
-            ShapeEntry::Runtime(field) => {
-                self.shape_fields[field.0 as usize] == ShapeField::Domain { rank: 1 }
-            }
-        };
-        if !rank_one || !stage.determines.is_empty() {
+        if !self.is_rank_one_domain(extent) || !stage.determines.is_empty() {
             return Err(Defect::WindowExtent(index));
         }
         for (&slot, &stencil) in stage.reads.iter().zip(&window.reads) {
             if let Some(stencil) = stencil {
-                self.check_stencil_read(index, stage, slot, stencil)?;
+                self.check_stencil_read(index, stage, slot, stencil, latest_writers)?;
             }
         }
         let mut seen = HashMap::new();
@@ -1419,12 +1445,20 @@ impl Unit {
 
         for (index, stencil) in self.stencils.iter().enumerate() {
             let defect = Defect::InvalidStencil(StencilRef(index as u32));
-            let port = self.inputs.get(stencil.input as usize).ok_or(defect)?;
+            let valid_source = match &stencil.source {
+                StencilSource::Input(input) => self
+                    .inputs
+                    .get(*input as usize)
+                    .is_some_and(|port| self.window_domain(port.kind, &port.shape).is_some()),
+                StencilSource::Scratch { domain, axis } => {
+                    *axis == AxisKind::Closed && self.is_rank_one_domain(domain)
+                }
+            };
             if stencil.min_offset > stencil.max_offset
                 || stencil
                     .valid_coordinates
                     .is_some_and(|bounds| bounds.min > bounds.max)
-                || self.window_domain(port.kind, &port.shape).is_none()
+                || !valid_source
             {
                 return Err(defect);
             }
@@ -1489,8 +1523,8 @@ impl Unit {
             }
         }
 
-        // Enforce production before consumption and unique shape producers.
-        let mut provided = vec![false; self.storage.len()];
+        // Track preceding writers for scratch certificates and first provision.
+        let mut latest_writers = vec![None; self.storage.len()];
         for (index, stage) in self.stages.iter().enumerate() {
             let index = index as u32;
             let late = |field: ShapeRef| Defect::ShapeNotYetKnown {
@@ -1559,7 +1593,7 @@ impl Unit {
                     });
                 };
                 // Storage provision consumes capacity dependencies.
-                if !std::mem::replace(&mut provided[slot.0 as usize], true) {
+                if latest_writers[slot.0 as usize].is_none() {
                     for entry in &need.capacity.0 {
                         match entry {
                             ShapeEntry::Runtime(field) if !produced[field.0 as usize] => {
@@ -1580,7 +1614,7 @@ impl Unit {
                 }
             }
             if let Some(window) = &stage.window {
-                self.check_window(index, stage, window)?;
+                self.check_window(index, stage, window, &latest_writers)?;
             }
             for field in &stage.determines {
                 if std::mem::replace(&mut produced[place(field)?], true) {
@@ -1590,6 +1624,9 @@ impl Unit {
             stage
                 .checked_frame(&self.shape_fields)
                 .ok_or(Defect::FrameTooLarge(index))?;
+            for slot in &stage.writes {
+                latest_writers[slot.0 as usize] = Some(stage);
+            }
         }
         match owed.into_iter().find(|field| !produced[field.0 as usize]) {
             Some(field) => Err(Defect::ResultShapeUnknown(field)),

@@ -1370,7 +1370,7 @@ mod unit {
             ],
             shape_fields: vec![ShapeField::Domain { rank: 1 }],
             stencils: vec![Stencil {
-                input: 0,
+                source: StencilSource::Input(0),
                 min_offset: -1,
                 max_offset: 1,
                 valid_coordinates: None,
@@ -1433,7 +1433,7 @@ mod unit {
             Storage::Alias(Slot(0)),
         ]);
         unit.stencils.push(Stencil {
-            input: 0,
+            source: StencilSource::Input(0),
             min_offset: -2,
             max_offset: 0,
             valid_coordinates: Some(CoordinateBounds { min: 7, max: 7 }),
@@ -1509,7 +1509,10 @@ mod unit {
             |u| u.stencils[0].min_offset = 2,
             Defect::InvalidStencil(stencil),
         );
-        refused(|u| u.stencils[0].input = 1, Defect::InvalidStencil(stencil));
+        refused(
+            |u| u.stencils[0].source = StencilSource::Input(1),
+            Defect::InvalidStencil(stencil),
+        );
         refused(
             |u| u.stencils[0].valid_coordinates = Some(CoordinateBounds { min: 1, max: 0 }),
             Defect::InvalidStencil(stencil),
@@ -1526,7 +1529,7 @@ mod unit {
                 let mut other = u.inputs[0].clone();
                 other.planes = vec![Slot(2)];
                 u.inputs.push(other);
-                u.stencils[0].input = 1;
+                u.stencils[0].source = StencilSource::Input(1);
             },
             read,
         );
@@ -1589,6 +1592,197 @@ mod unit {
                 field: ShapeRef(1),
             },
         );
+    }
+
+    /// Two scratch planes share a seven-site domain. The result adds a site
+    /// at the end while keeping the same nonzero origin.
+    fn scratch_window_unit(source: ShapeEntry) -> Unit {
+        let mut tables = Tables::default();
+        let (kind, layout) = tables.reals();
+        let output = ShapeEntry::Fixed(ShapeValue::Domain(vec![Axis {
+            origin: 10,
+            extent: 8,
+        }]));
+        let (shape_fields, uses) = if matches!(source, ShapeEntry::Runtime(_)) {
+            (vec![ShapeField::Domain { rank: 1 }], vec![0])
+        } else {
+            (vec![], vec![])
+        };
+        Unit {
+            outputs: vec![tables.port(kind, layout, vec![output.clone()], &[2])],
+            storage: vec![
+                Storage::Scratch(need(4, vec![source.clone()])),
+                Storage::Scratch(need(8, vec![source.clone()])),
+                Storage::Output(need(8, vec![output.clone()])),
+            ],
+            shape_fields,
+            stencils: vec![Stencil {
+                source: StencilSource::Scratch {
+                    domain: source.clone(),
+                    axis: AxisKind::Closed,
+                },
+                min_offset: -1,
+                max_offset: 0,
+                valid_coordinates: Some(CoordinateBounds { min: 10, max: 17 }),
+            }],
+            stages: vec![
+                Stage {
+                    entry: "produce".into(),
+                    extent: Some(source),
+                    window: Some(RankOneWindow {
+                        reads: vec![],
+                        writes: vec![by_site(1), by_site(1)],
+                    }),
+                    ..stage(&[0, 1], &uses, &[])
+                },
+                Stage {
+                    entry: "consume".into(),
+                    reads: vec![Slot(0), Slot(1)],
+                    extent: Some(output),
+                    window: Some(RankOneWindow {
+                        reads: vec![Some(StencilRef(0)); 2],
+                        writes: vec![by_site(1)],
+                    }),
+                    ..stage(&[2], &uses, &[])
+                },
+            ],
+            ..tables.unit()
+        }
+    }
+
+    fn scratch_domain() -> ShapeEntry {
+        ShapeEntry::Fixed(ShapeValue::Domain(vec![Axis {
+            origin: 10,
+            extent: 7,
+        }]))
+    }
+
+    #[test]
+    fn scratch_stencil_planes_share_a_frame_start_across_unequal_extents() {
+        let checked = scratch_window_unit(scratch_domain()).check().unwrap();
+        let unit = checked.unit();
+        let frame = unit.stages[1].frame(&unit.shape_fields);
+        assert_eq!(frame.slots, [Slot(0), Slot(1), Slot(2)]);
+        assert_eq!(frame.words, 6);
+        assert_eq!(
+            frame.window,
+            Some(WindowFrame {
+                first: 3,
+                count: 4,
+                starts: vec![(StencilRef(0), 5)],
+            })
+        );
+    }
+
+    #[test]
+    fn scratch_stencils_require_the_latest_exact_domain_initializer() {
+        let read = |stage, slot| {
+            Some(Defect::StencilRead {
+                stage,
+                slot: Slot(slot),
+                stencil: StencilRef(0),
+            })
+        };
+        let mut unit = scratch_window_unit(scratch_domain());
+        // A valid declaration may leave the other scratch plane unwritten,
+        // but a shared certificate must reject that particular read.
+        unit.stages[0].writes.pop();
+        unit.stages[0].window.as_mut().unwrap().writes.pop();
+        assert_eq!(unit.check().defect(), read(1, 1));
+
+        let mut unit = scratch_window_unit(scratch_domain());
+        unit.stages.insert(1, stage(&[0], &[], &[]));
+        assert_eq!(unit.check().defect(), read(2, 0));
+
+        // With zero sites, one or two elements per site give the same
+        // capacity. The write discipline still has to match.
+        let mut empty = scratch_window_unit(cells(0));
+        empty.clone().check().unwrap();
+        empty.stages[0].window.as_mut().unwrap().writes[0] = by_site(2);
+        assert_eq!(empty.check().defect(), read(1, 0));
+
+        let mut unit = scratch_window_unit(scratch_domain());
+        let mut later = unit.stages[0].clone();
+        // Same capacity, different ordinal interpretation.
+        later.extent = Some(cells(7));
+        unit.stages.insert(1, later);
+        assert_eq!(unit.check().defect(), read(2, 0));
+
+        let mut unit = scratch_window_unit(scratch_domain());
+        unit.storage[0] = Storage::Scratch(need(4, vec![cells(6)]));
+        assert_eq!(
+            unit.check().defect(),
+            Some(Defect::WindowCapacity {
+                stage: 0,
+                slot: Slot(0),
+            })
+        );
+
+        let mut unit = scratch_window_unit(scratch_domain());
+        unit.storage[0] = Storage::Output(need(4, vec![scratch_domain()]));
+        assert_eq!(unit.check().defect(), read(1, 0));
+    }
+
+    #[test]
+    fn scratch_stencils_require_a_closed_rank_one_source_and_its_dynamic_use() {
+        let mut unit = scratch_window_unit(at(0));
+        unit.stages.insert(0, stage(&[], &[], &[0]));
+        let checked = unit.clone().check().unwrap();
+        let frame = checked.unit().stages[2].frame(&unit.shape_fields);
+        assert_eq!(frame.shapes, [(ShapeRef(0), 3)]);
+        assert_eq!(frame.window.unwrap().starts, [(StencilRef(0), 7)]);
+
+        let mut unavailable = unit.clone();
+        unavailable.stages.remove(0);
+        assert_eq!(
+            unavailable.check().defect(),
+            Some(Defect::ShapeNotYetKnown {
+                stage: 0,
+                field: ShapeRef(0),
+            })
+        );
+
+        let mut missing_use = unit.clone();
+        missing_use.stages[2].uses.clear();
+        assert_eq!(
+            missing_use.check().defect(),
+            Some(Defect::GoverningShapeUnused {
+                stage: 2,
+                field: ShapeRef(0),
+            })
+        );
+
+        let mut wrong_domain = unit.clone();
+        wrong_domain
+            .shape_fields
+            .push(ShapeField::Domain { rank: 1 });
+        wrong_domain.stages[0].determines.push(ShapeRef(1));
+        wrong_domain.stages[2].uses.push(ShapeRef(1));
+        wrong_domain.stencils[0].source = StencilSource::Scratch {
+            domain: at(1),
+            axis: AxisKind::Closed,
+        };
+        assert_eq!(
+            wrong_domain.check().defect(),
+            Some(Defect::StencilRead {
+                stage: 2,
+                slot: Slot(0),
+                stencil: StencilRef(0),
+            })
+        );
+
+        let invalid = Some(Defect::InvalidStencil(StencilRef(0)));
+        for (domain, axis) in [
+            (at(0), AxisKind::Periodic),
+            (at(1), AxisKind::Closed),
+            (ShapeEntry::Fixed(ShapeValue::Length(7)), AxisKind::Closed),
+        ] {
+            let mut malformed = unit.clone();
+            malformed.stencils[0].source = StencilSource::Scratch { domain, axis };
+            assert_eq!(malformed.check().defect(), invalid);
+        }
+        unit.stencils[0].valid_coordinates = Some(CoordinateBounds { min: 17, max: 10 });
+        assert_eq!(unit.check().defect(), invalid);
     }
 
     #[test]

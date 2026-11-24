@@ -847,7 +847,7 @@ pub struct Selection {
     pub otherwise: Option<u32>,
 }
 
-/// Index of a shared input stencil in a unit.
+/// Index of a shared read stencil in a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StencilRef(pub u32);
 
@@ -858,11 +858,25 @@ pub struct CoordinateBounds {
     pub max: i64,
 }
 
-/// A supplier's coverage proof for a dense rank-one input Array on a closed
-/// or periodic axis, optionally inside an Optional. At each certified output
-/// coordinate `x`, normalize the mathematical interval from `x + min_offset`
-/// through `x + max_offset` against the actual input domain. Its ordinals
-/// include every applicable input hit after the emitted index arithmetic and
+/// The source of a rank-one stencil.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StencilSource {
+    /// An input port holding a dense Array on a closed or periodic axis,
+    /// possibly inside an Optional.
+    Input(u32),
+    /// A definitely applicable dense scratch Array on a closed axis. The
+    /// stage read names the scratch slot. Its latest preceding writer must
+    /// initialize one plane element per site as a checked [by-site
+    /// write](WriteOwnership::BySite) over this exact domain. The slot's
+    /// capacity is that domain's extent. A dynamic domain is among the
+    /// consumer's [uses](Stage::uses).
+    Scratch { domain: ShapeEntry, axis: AxisKind },
+}
+
+/// A supplier's coverage proof for a dense rank-one Array. At each certified
+/// output coordinate `x`, normalize the mathematical interval from `x + min_offset`
+/// through `x + max_offset` against the actual source domain. Its ordinals
+/// include every applicable hit after the emitted index arithmetic and
 /// normalization, including composed loads through the participating planes.
 /// The offsets do not specify the source arithmetic width.
 ///
@@ -872,7 +886,7 @@ pub struct CoordinateBounds {
 /// prove a stronger combined certificate directly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stencil {
-    pub input: u32,
+    pub source: StencilSource,
     pub min_offset: i32,
     pub max_offset: i32,
     /// `None` certifies every global output coordinate in an admitted binding.
@@ -896,7 +910,7 @@ pub enum WriteOwnership {
 
 /// An entry equivalent to whole execution over every valid disjoint cover
 /// of its dense finite rank-one extent and every valid binding of the same
-/// captured inputs. The entry determines no shapes. Global domains stay
+/// captured contents. The entry determines no shapes. Global domains stay
 /// intact. For window start `a`, count `n`, and extent `E`, the runtime
 /// checks `a <= E` and `n <= E-a`. Each local site `t < n` uses global
 /// ordinal `a+t` and writes its by-site elements starting at local `t*k`.
@@ -905,14 +919,16 @@ pub enum WriteOwnership {
 /// An empty window needs no invocation.
 ///
 /// The supplier qualifies coordinate arithmetic for all participating
-/// inputs and outputs. Source arithmetic, including wrapping, precedes
-/// normalization against the actual input domain. When geometries differ
-/// or a narrow offset proof does not apply, bind the full input within that
-/// same coordinate profile. A closed miss or empty domain retains its
-/// language meaning. A present site missing from local storage requires a
-/// valid binding before execution.
+/// read sources and outputs. Source arithmetic, including wrapping, precedes
+/// normalization against the actual source domain. When geometries differ
+/// or a narrow offset proof does not apply, bind the full source within that
+/// same coordinate profile. A certified read of closed scratch can use a
+/// compact binding when the source domain and output extent have the same
+/// origin and different extents. Clip its mathematical read hull against
+/// the actual source domain. A closed miss or empty domain retains its
+/// language meaning.
 ///
-/// A compact input arc of distinct ordinals starts at `s` in an input of
+/// A compact read arc of distinct ordinals starts at `s` in a source of
 /// extent `e`. For a normalized hit `g`, the local ordinal is `g-s`, or
 /// `e-(s-g)` when a periodic arc wraps and `g<s`. The binder establishes
 /// that each reachable hit is in the arc. A complete arc starts at zero,
@@ -921,28 +937,32 @@ pub enum WriteOwnership {
 /// refer to the same backing plane. If a use requires a complete view,
 /// widen every applicable plane sharing its stencil and every other use
 /// of the same canonical plane to a consistent complete view. Each binding
-/// must supply the captured content required through that slot.
+/// must supply the captured contents required through that slot and retain
+/// them until the invocation retires.
 ///
 /// Binding resolves demand and Optional presence first. For each applicable
 /// stencil of a nonempty window, compute the mathematical global output
 /// endpoints `origin + a` and `origin + a + n - 1` with checked widened
 /// arithmetic. Compact binding requires both endpoints to satisfy the
-/// stencil's coordinate certificate. Otherwise bind the complete input at
+/// stencil's coordinate certificate. Otherwise bind the complete source at
 /// start zero, with the same widening for shared planes and aliases. A
-/// window binder must honor the certificate or supply complete inputs even
+/// window binder must honor the certificate or supply complete views even
 /// though the certificate occupies no frame words.
 ///
-/// A stencil entry
-/// consumes its input domain and any enclosing presence when dynamic,
-/// either directly or through a verified shape assumption. Inapplicable
-/// descriptors use zero words without accessing storage. Each authoritative
-/// output plane covers its applicable sites exactly once. An applicable
-/// empty plane retains its backing identity.
+/// A stencil entry consumes a port's dynamic domain and any enclosing
+/// presence, either directly or through a verified shape assumption.
+/// Inapplicable port reads use zero words without accessing storage.
+/// Scratch reads require valid backing from the latest preceding writer
+/// and an available domain matching that writer's domain, even for a
+/// complete binding. If either fails, refuse the binding before submitting
+/// the consumer. Each authoritative output plane covers its applicable
+/// sites exactly once. An applicable empty plane retains its backing identity.
 #[derive(Clone, Debug)]
 pub struct RankOneWindow {
     /// One item per stage read. `None` supplies a contiguous complete slot
     /// from ordinal zero, including previously partitioned scratch. A
-    /// stencil reads one of its input port's planes directly or by alias.
+    /// port stencil reads one of its input port's planes directly or by
+    /// alias. A scratch stencil reads the named scratch slot.
     pub reads: Vec<Option<StencilRef>>,
     /// One discipline per stage write, including scratch. Repeated entries
     /// for a slot must agree.
@@ -1077,7 +1097,7 @@ pub struct Unit {
     pub storage: Vec<Storage>,
     /// Unique declarations of shape values not fixed at compile time.
     pub shape_fields: Vec<ShapeField>,
-    /// Input stencils shared by stages and planes.
+    /// Read stencils shared by stages and planes.
     pub stencils: Vec<Stencil>,
     /// Stages in a valid execution order.
     pub stages: Vec<Stage>,
@@ -1422,7 +1442,7 @@ pub enum Defect {
     /// an input.
     ShapeProducedTwice(ShapeRef),
     /// A stage omits a shape dependency of a result plane it writes or a
-    /// stencil input it reads.
+    /// stencil source it reads.
     GoverningShapeUnused {
         stage: u32,
         field: ShapeRef,
@@ -1442,13 +1462,14 @@ pub enum Defect {
     ExtentUnused(u32),
     /// The stage's frame cannot be indexed and counted in u32 words.
     FrameTooLarge(u32),
-    /// A stencil has reversed bounds or an incompatible or missing input.
+    /// A stencil has reversed bounds or an invalid source declaration.
     InvalidStencil(StencilRef),
     /// A window needs a rank-one domain extent and cannot determine shapes.
     WindowExtent(u32),
     /// Window read and write lists must correspond to the stage's lists.
     WindowArity(u32),
-    /// The reference is missing, or the slot is not a plane of its input.
+    /// The stencil reference is missing, or the slot or its producer does
+    /// not match the declared source.
     StencilRead {
         stage: u32,
         slot: Slot,
@@ -1555,7 +1576,7 @@ pub enum Refusal {
 /// to a part fixed as absent.
 ///
 /// Validation alone does not establish readiness to execute. It does not
-/// verify that every result is written, that storage reads follow writes,
+/// verify that every result is written, that every storage read follows a write,
 /// that writes fit declared capacity, that alignments are usable, or that
 /// code follows its description. It establishes declared ordering, not
 /// runtime location or completion of shape production.
