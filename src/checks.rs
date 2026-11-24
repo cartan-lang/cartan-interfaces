@@ -1421,6 +1421,9 @@ impl Unit {
             let defect = Defect::InvalidStencil(StencilRef(index as u32));
             let port = self.inputs.get(stencil.input as usize).ok_or(defect)?;
             if stencil.min_offset > stencil.max_offset
+                || stencil
+                    .valid_coordinates
+                    .is_some_and(|bounds| bounds.min > bounds.max)
                 || self.window_domain(port.kind, &port.shape).is_none()
             {
                 return Err(defect);

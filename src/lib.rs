@@ -851,15 +851,33 @@ pub struct Selection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StencilRef(pub u32);
 
-/// Inclusive bounds on the signed offsets from the output coordinate of
-/// every applicable load through the participating planes. The supplier
-/// proves this relation for the emitted computation. The port names a dense
-/// rank-one Array on a closed or periodic axis, optionally inside an Optional.
+/// Closed interval of mathematical global output coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoordinateBounds {
+    pub min: i64,
+    pub max: i64,
+}
+
+/// A supplier's coverage proof for a dense rank-one input Array on a closed
+/// or periodic axis, optionally inside an Optional. At each certified output
+/// coordinate `x`, normalize the mathematical interval from `x + min_offset`
+/// through `x + max_offset` against the actual input domain. Its ordinals
+/// include every applicable input hit after the emitted index arithmetic and
+/// normalization, including composed loads through the participating planes.
+/// The offsets do not specify the source arithmetic width.
+///
+/// Combining load proofs takes the union's offset hull and intersects their
+/// coordinate intervals, treating an unconditional proof as universal. An
+/// empty intersection requires a complete read. A supplier may instead
+/// prove a stronger combined certificate directly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stencil {
     pub input: u32,
     pub min_offset: i32,
     pub max_offset: i32,
+    /// `None` certifies every global output coordinate in an admitted binding.
+    /// `Some` limits the proof to this inclusive interval.
+    pub valid_coordinates: Option<CoordinateBounds>,
 }
 
 /// The logical elements each site of a window entry may write in a slot.
@@ -905,7 +923,16 @@ pub enum WriteOwnership {
 /// of the same canonical plane to a consistent complete view. Each binding
 /// must supply the captured content required through that slot.
 ///
-/// Binding follows existing demand and Optional presence. A stencil entry
+/// Binding resolves demand and Optional presence first. For each applicable
+/// stencil of a nonempty window, compute the mathematical global output
+/// endpoints `origin + a` and `origin + a + n - 1` with checked widened
+/// arithmetic. Compact binding requires both endpoints to satisfy the
+/// stencil's coordinate certificate. Otherwise bind the complete input at
+/// start zero, with the same widening for shared planes and aliases. A
+/// window binder must honor the certificate or supply complete inputs even
+/// though the certificate occupies no frame words.
+///
+/// A stencil entry
 /// consumes its input domain and any enclosing presence when dynamic,
 /// either directly or through a verified shape assumption. Inapplicable
 /// descriptors use zero words without accessing storage. Each authoritative

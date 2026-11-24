@@ -1373,6 +1373,7 @@ mod unit {
                 input: 0,
                 min_offset: -1,
                 max_offset: 1,
+                valid_coordinates: None,
             }],
             stages: vec![Stage {
                 reads: vec![Slot(0)],
@@ -1435,6 +1436,7 @@ mod unit {
             input: 0,
             min_offset: -2,
             max_offset: 0,
+            valid_coordinates: Some(CoordinateBounds { min: 7, max: 7 }),
         });
         unit.stages[0].reads = vec![Slot(0), Slot(3), Slot(2)];
         let first = StencilRef(1);
@@ -1508,6 +1510,10 @@ mod unit {
             Defect::InvalidStencil(stencil),
         );
         refused(|u| u.stencils[0].input = 1, Defect::InvalidStencil(stencil));
+        refused(
+            |u| u.stencils[0].valid_coordinates = Some(CoordinateBounds { min: 1, max: 0 }),
+            Defect::InvalidStencil(stencil),
+        );
         let read = Defect::StencilRead {
             stage: 0,
             slot: Slot(0),
