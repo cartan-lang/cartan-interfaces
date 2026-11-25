@@ -908,9 +908,15 @@ pub enum WriteOwnership {
     BySite { elements: core::num::NonZeroU32 },
 }
 
-/// An entry equivalent to whole execution over every valid disjoint cover
-/// of its dense finite rank-one extent and every valid binding of the same
-/// captured contents. The entry determines no shapes. Global domains stay
+/// On any valid window of its dense finite rank-one extent, a by-site
+/// entry produces the same elements as whole execution at those ordinals
+/// for every valid binding of the same captured contents. Disjoint windows
+/// can therefore cover a published output. Independent invocations may
+/// compute overlapping ordinals of private Scratch in separate writable
+/// regions. Each private reader must receive the contents that whole
+/// execution of its preceding writers would have supplied. A
+/// [whole-slot write](WriteOwnership::Whole) still requires a complete
+/// invocation. The entry determines no shapes. Global domains stay
 /// intact. For window start `a`, count `n`, and extent `E`, the runtime
 /// checks `a <= E` and `n <= E-a`. Each local site `t < n` uses global
 /// ordinal `a+t` and writes its by-site elements starting at local `t*k`.
