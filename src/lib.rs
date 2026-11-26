@@ -700,7 +700,7 @@ pub enum Memory {
 }
 
 /// An index into a unit's storage table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Slot(pub u32);
 
 /// A slot's required element capacity: the product of the counts represented
@@ -833,17 +833,23 @@ pub struct OutputPort {
 /// selection chooses it. The runtime need not hold that input while every
 /// relevant Optional is present, and then leaves its port unbound.
 ///
-/// Gap: device-side selection and conditional demand for its fallback are
-/// unspecified.
+/// A Bool condition instead selects the entire input in `first` when true or
+/// `otherwise` when false. Both alternatives have the result's kind and
+/// layout, and either input may be left unbound when used only as an
+/// unchosen arm. This form is a standalone selection unit with no stages or
+/// unrelated inputs.
+/// The condition is one bound Bool in an I32 scalar plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     /// The demand this result meets.
     pub demand: Demand,
     /// A reference into the unit's table of kinds.
     pub kind: KindRef,
-    /// The input selected unconditionally or when present.
+    /// A Bool selector input, if this is a choice between whole inputs.
+    pub condition: Option<u32>,
+    /// The input selected unconditionally, when present, or on true.
     pub first: u32,
-    /// The fallback input selected when `first` is absent.
+    /// The fallback selected when `first` is absent or the condition is false.
     pub otherwise: Option<u32>,
 }
 
@@ -1164,6 +1170,8 @@ pub enum TextScalar {
     Int(i32),
     /// IEEE 754 binary32 bits, including signed zero and nonfinite values.
     Real32(u32),
+    /// IEEE 754 binary64 bits.
+    Real64(u64),
 }
 
 /// The decimal notation requested by a text operation.
@@ -1212,10 +1220,16 @@ pub enum TextOp {
         value: TextScalar,
         format: TextFormat,
     },
+    /// Format the scalar in a checked input slot. Measure and Fill reuse
+    /// the same captured bits, with one read per input for the execution.
+    FormatInput {
+        slot: Slot,
+        format: TextFormat,
+    },
 }
 
 /// A native text stage, aligned by index with a unit's stage list. Every stage
-/// runs once with no dispatch extent, storage reads or implicit inputs.
+/// runs once with no dispatch extent or implicit inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostStage {
     /// Measure UTF-8 code units and produce one encoded-length shape value.
@@ -1228,9 +1242,27 @@ pub enum HostStage {
         output: Slot,
         length: ShapeEntry,
     },
+    /// Compare two bound UTF-8 String planes by their exact bytes. Write one
+    /// Bool encoded as little-endian I32 in the session's numerical memory.
+    /// The operands may name the same input. This stage is supplied alone.
+    CompareUtf8 {
+        inputs: [Slot; 2],
+        lengths: [ShapeRef; 2],
+        output: Slot,
+        unequal: bool,
+    },
+    /// Look up an exact String key in strictly byte-ordered, unique entries.
+    /// The unit reads one UTF-8 input and writes an I32 Int in numerical
+    /// memory. Missing keys write zero. This stage is supplied alone.
+    LookupInt {
+        key: Slot,
+        length: ShapeRef,
+        output: Slot,
+        entries: Vec<(String, i32)>,
+    },
 }
 
-/// A native artifact implementing a closed text computation. Several logical
+/// A native artifact implementing a text computation. Several logical
 /// operations and stages may belong to one unit, sharing this one text table.
 /// The runtime uses its ordinary unit cache, value ownership and publication.
 /// Outputs satisfy distinct Derived value demands; one computation identity
@@ -1241,7 +1273,7 @@ pub enum HostStage {
 /// no fill or result publication follows it.
 /// Counting and writing use the same formatting semantics, with checked sizes
 /// and bounded output. Temporary text cannot bypass Runtime storage accounting.
-/// Gap: text operands from input ports and other host services are unspecified.
+/// Comparison reads bound String inputs. Formatting can read bound scalar inputs.
 #[derive(Clone, Debug, Default)]
 pub struct HostCode {
     pub text: Vec<TextOp>,

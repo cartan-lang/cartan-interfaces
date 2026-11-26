@@ -1264,6 +1264,7 @@ mod unit {
     #[test]
     fn a_result_may_be_an_optional_input_or_a_fallback_without_a_copy() {
         let choose = |kind, first, otherwise| Selection {
+            condition: None,
             demand: STATE,
             kind,
             first,
@@ -1297,6 +1298,43 @@ mod unit {
         // Selections must reference existing inputs.
         let unit = current(Scalar::F64, |array, _| choose(array, 0, Some(7)));
         assert_eq!(unit.check().defect(), Some(Defect::UnknownInput(selected)));
+    }
+
+    #[test]
+    fn a_scalar_bool_routes_one_of_two_compatible_inputs() {
+        let mut tables = Tables::default();
+        let flag = tables.kinds.fiber(Fiber::Bool);
+        let flag = tables.kinds.define(Kind::Fiber(flag));
+        let int = tables.kinds.fiber(Fiber::Int);
+        let int = tables.kinds.define(Kind::Fiber(int));
+        let i32 = tables.layouts.define(Layout::Scalar(Scalar::I32));
+        let unit = Unit {
+            inputs: vec![
+                tables.port(flag, i32, vec![], &[0]),
+                tables.port(int, i32, vec![], &[1]),
+                tables.port(int, i32, vec![], &[2]),
+            ],
+            storage: vec![Storage::Input(need(4, vec![])); 3],
+            selected: vec![Selection {
+                demand: STATE,
+                kind: int,
+                condition: Some(0),
+                first: 1,
+                otherwise: Some(2),
+            }],
+            ..tables.unit()
+        };
+        assert!(unit.clone().check().is_ok());
+        let mismatch = Some(Defect::KindMismatch(PortRef::Selected(0)));
+        let mut non_bool = unit.clone();
+        non_bool.inputs[0].kind = int;
+        assert_eq!(non_bool.check().defect(), mismatch);
+        let mut missing_else = unit.clone();
+        missing_else.selected[0].otherwise = None;
+        assert_eq!(missing_else.check().defect(), mismatch);
+        let mut mismatched_arms = unit;
+        mismatched_arms.inputs[2].kind = flag;
+        assert_eq!(mismatched_arms.check().defect(), mismatch);
     }
 
     #[test]
@@ -1975,6 +2013,204 @@ mod host {
             ],
         };
         (unit, code)
+    }
+
+    #[test]
+    fn comparison_checks_utf8_inputs_and_the_numerical_bool_output() {
+        let mut unit = Unit::default();
+        let string = unit.kinds.define(Kind::String);
+        let boolean = unit.kinds.fiber(Fiber::Bool);
+        let boolean = unit.kinds.define(Kind::Fiber(boolean));
+        let utf8 = unit.layouts.define(Layout::Utf8);
+        let i32 = unit.layouts.define(Layout::Scalar(Scalar::I32));
+        let lengths = [ShapeRef(0), ShapeRef(1)];
+        let inputs = [Slot(0), Slot(1)];
+        for (slot, length) in inputs.into_iter().zip(lengths) {
+            let shape = vec![ShapeEntry::Runtime(length)];
+            unit.shape_fields.push(ShapeField::EncodedLength);
+            unit.inputs.push(InputPort {
+                node: Node::Derived(DerivedId(slot.0)),
+                kind: string,
+                layout: utf8,
+                shape: shape.clone(),
+                planes: vec![slot],
+                assumes: vec![],
+            });
+            unit.storage.push(Storage::Input(Need {
+                memory: Memory::Host,
+                element_bytes: 1,
+                align: 1,
+                capacity: Capacity(shape),
+            }));
+        }
+        let output = Slot(2);
+        unit.outputs.push(OutputPort {
+            demand: Demand::Value(Node::Derived(DerivedId(2))),
+            kind: boolean,
+            layout: i32,
+            shape: vec![],
+            planes: vec![output],
+        });
+        unit.storage.push(Storage::Output(Need {
+            memory: Memory::Linear,
+            element_bytes: 4,
+            align: 4,
+            capacity: Capacity::default(),
+        }));
+        unit.stages.push(Stage {
+            entry: "compare".into(),
+            reads: inputs.to_vec(),
+            uses: lengths.to_vec(),
+            writes: vec![output],
+            ..Default::default()
+        });
+        let code = HostCode {
+            text: vec![],
+            stages: vec![HostStage::CompareUtf8 {
+                inputs,
+                lengths,
+                output,
+                unequal: false,
+            }],
+        };
+        let checked = unit.clone().check().unwrap();
+        assert_eq!(code.check(&checked), Ok(()));
+        let mut wrong_length = code.clone();
+        let HostStage::CompareUtf8 { lengths, .. } = &mut wrong_length.stages[0] else {
+            unreachable!()
+        };
+        lengths.swap(0, 1);
+        assert_eq!(
+            wrong_length.check(&checked),
+            Err(HostDefect::Stage { index: 0 })
+        );
+
+        let Storage::Output(need) = &mut unit.storage[output.0 as usize] else {
+            unreachable!()
+        };
+        need.memory = Memory::Host;
+        assert_eq!(
+            code.check(&unit.check().unwrap()),
+            Err(HostDefect::Storage { slot: output })
+        );
+    }
+
+    #[test]
+    fn lookup_requires_a_unique_ordered_table_and_an_int_output() {
+        let mut unit = Unit::default();
+        let string = unit.kinds.define(Kind::String);
+        let int = unit.kinds.fiber(Fiber::Int);
+        let int = unit.kinds.define(Kind::Fiber(int));
+        let utf8 = unit.layouts.define(Layout::Utf8);
+        let i32 = unit.layouts.define(Layout::Scalar(Scalar::I32));
+        let key = Slot(0);
+        let length = ShapeRef(0);
+        let output = Slot(1);
+        let shape = vec![ShapeEntry::Runtime(length)];
+        unit.shape_fields.push(ShapeField::EncodedLength);
+        unit.inputs.push(InputPort {
+            node: Node::Derived(DerivedId(0)),
+            kind: string,
+            layout: utf8,
+            shape: shape.clone(),
+            planes: vec![key],
+            assumes: vec![],
+        });
+        unit.storage.push(Storage::Input(Need {
+            memory: Memory::Host,
+            element_bytes: 1,
+            align: 1,
+            capacity: Capacity(shape),
+        }));
+        unit.outputs.push(OutputPort {
+            demand: Demand::Value(Node::Derived(DerivedId(1))),
+            kind: int,
+            layout: i32,
+            shape: vec![],
+            planes: vec![output],
+        });
+        unit.storage.push(Storage::Output(Need {
+            memory: Memory::Linear,
+            element_bytes: 4,
+            align: 4,
+            capacity: Capacity::default(),
+        }));
+        unit.stages.push(Stage {
+            entry: "lookup".into(),
+            reads: vec![key],
+            uses: vec![length],
+            writes: vec![output],
+            ..Stage::default()
+        });
+        let code = |entries| HostCode {
+            text: vec![],
+            stages: vec![HostStage::LookupInt {
+                key,
+                length,
+                output,
+                entries,
+            }],
+        };
+        let checked = unit.clone().check().unwrap();
+        let good = code(vec![("a".into(), 1), ("é".into(), 2)]);
+        assert_eq!(good.check(&checked), Ok(()));
+        for malformed in [["a", "a"], ["é", "a"]] {
+            assert_eq!(
+                code(malformed.map(|key| (key.into(), 1)).to_vec()).check(&checked),
+                Err(HostDefect::Stage { index: 0 })
+            );
+        }
+        let boolean = unit.kinds.fiber(Fiber::Bool);
+        unit.outputs[0].kind = unit.kinds.define(Kind::Fiber(boolean));
+        assert_eq!(
+            good.check(&unit.check().unwrap()),
+            Err(HostDefect::Output { index: 0 })
+        );
+    }
+
+    #[test]
+    fn input_format_checks_the_scalar_port_and_both_stage_reads() {
+        let (mut unit, mut code) = template();
+        let fiber = unit.kinds.fiber(Fiber::Real);
+        let kind = unit.kinds.define(Kind::Fiber(fiber));
+        let layout = unit.layouts.define(Layout::Scalar(Scalar::F64));
+        let slot = Slot(1);
+        unit.inputs.push(InputPort {
+            node: Node::Derived(DerivedId(1)),
+            kind,
+            layout,
+            shape: vec![],
+            planes: vec![slot],
+            assumes: vec![],
+        });
+        unit.storage.push(Storage::Input(Need {
+            memory: Memory::Linear,
+            element_bytes: 8,
+            align: 8,
+            capacity: Capacity::default(),
+        }));
+        for stage in &mut unit.stages {
+            stage.reads = vec![slot];
+        }
+        code.text[1] = TextOp::FormatInput {
+            slot,
+            format: TextFormat::default(),
+        };
+        assert_eq!(code.check(&unit.clone().check().unwrap()), Ok(()));
+        unit.stages[1].reads.clear();
+        assert_eq!(
+            code.check(&unit.clone().check().unwrap()),
+            Err(HostDefect::Stage { index: 1 })
+        );
+        unit.stages[1].reads.push(slot);
+        let Storage::Input(need) = &mut unit.storage[1] else {
+            unreachable!()
+        };
+        need.memory = Memory::Host;
+        assert_eq!(
+            code.check(&unit.check().unwrap()),
+            Err(HostDefect::Storage { slot })
+        );
     }
 
     #[test]

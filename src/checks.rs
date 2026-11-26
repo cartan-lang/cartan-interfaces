@@ -2,7 +2,7 @@
 //! validation.
 
 use super::*;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // Kinds: logical value structure
 
@@ -913,7 +913,10 @@ impl Checked {
         for (index, selection) in unit.selected.iter().enumerate() {
             // An Optional's presence is the first of its shape values.
             let first = &unit.inputs[selection.first as usize];
-            if selection.otherwise.is_some() && first.shape.first() == Some(&named) {
+            if selection.condition.is_none()
+                && selection.otherwise.is_some()
+                && first.shape.first() == Some(&named)
+            {
                 consumers.push(Consumer::Selection(index as u32));
             }
         }
@@ -1473,6 +1476,28 @@ impl Unit {
                     .ok_or(Defect::UnknownInput(at))
             };
             let first = input(selection.first)?;
+            if let Some(condition) = selection.condition {
+                let false_arm = selection.otherwise.ok_or(Defect::KindMismatch(at))?;
+                let used = [condition, selection.first, false_arm]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                let condition = input(condition)?;
+                let arm = input(false_arm)?;
+                if self.inputs.len() != used.len()
+                    || self.selected.len() != 1
+                    || !self.stages.is_empty()
+                    || !self.outputs.is_empty()
+                    || !matches!(self.kinds.get(condition.kind),
+                        Some(Kind::Fiber(fiber)) if self.kinds.get_fiber(*fiber) == Some(&Fiber::Bool))
+                    || self.layouts.get(condition.layout) != Some(&Layout::Scalar(Scalar::I32))
+                    || first.kind != selection.kind
+                    || arm.kind != selection.kind
+                    || first.layout != arm.layout
+                {
+                    return Err(Defect::KindMismatch(at));
+                }
+                continue;
+            }
             let fits = match selection.otherwise {
                 None => first.kind == selection.kind,
                 Some(otherwise) => {
@@ -1643,9 +1668,62 @@ impl HostCode {
     /// This checks descriptions, not the results of executing a formatter.
     pub fn check(&self, checked: &Checked) -> Result<(), HostDefect> {
         let unit = checked.unit();
-        if !unit.inputs.is_empty() || !unit.selected.is_empty() {
+        if let [HostStage::CompareUtf8 {
+            inputs,
+            lengths,
+            output,
+            ..
+        }] = self.stages.as_slice()
+        {
+            let (reads, uses) = if inputs[0] == inputs[1] {
+                if lengths[0] != lengths[1] {
+                    return Err(HostDefect::Stage { index: 0 });
+                }
+                (&inputs[..1], &lengths[..1])
+            } else {
+                (&inputs[..], &lengths[..])
+            };
+            return self.check_utf8_scalar(unit, reads, uses, *output, Fiber::Bool);
+        }
+        if let [HostStage::LookupInt {
+            key,
+            length,
+            output,
+            entries,
+        }] = self.stages.as_slice()
+        {
+            if !entries.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+                return Err(HostDefect::Stage { index: 0 });
+            }
+            return self.check_utf8_scalar(unit, &[*key], &[*length], *output, Fiber::Int);
+        }
+        if !unit.selected.is_empty() {
             return Err(HostDefect::Inputs);
         }
+        let mut inputs = BTreeMap::new();
+        for port in &unit.inputs {
+            let [slot] = port.planes.as_slice() else {
+                return Err(HostDefect::Inputs);
+            };
+            let Some((scalar, boolean)) = unit.text_scalar(port) else {
+                return Err(HostDefect::Inputs);
+            };
+            let bytes = if scalar == Scalar::F64 { 8 } else { 4 };
+            let Some(Storage::Input(need)) = unit.storage.get(slot.0 as usize) else {
+                return Err(HostDefect::Storage { slot: *slot });
+            };
+            if !matches!(need.memory, Memory::Linear | Memory::Device(0))
+                || need.element_bytes != bytes
+                || need.align != bytes
+                || !need.capacity.0.is_empty()
+                || !port.shape.is_empty()
+                || !port.assumes.is_empty()
+                || inputs.insert(slot.0, boolean).is_some()
+            {
+                return Err(HostDefect::Storage { slot: *slot });
+            }
+        }
+        let mut referenced = BTreeSet::new();
         for (index, operation) in self.text.iter().enumerate() {
             let at = TextRef(index as u32);
             match operation {
@@ -1658,16 +1736,55 @@ impl HostCode {
                     }
                 }
                 TextOp::Format { value, format } => {
-                    if format.digits.is_some_and(|digits| digits > 17)
-                        || matches!(value, TextScalar::Bool(_)) && *format != TextFormat::default()
-                    {
-                        return Err(HostDefect::Format { at });
-                    }
+                    check_text_format(at, *format, matches!(value, TextScalar::Bool(_)))?;
                 }
+                TextOp::FormatInput { slot, format } => {
+                    let boolean = inputs
+                        .get(&slot.0)
+                        .ok_or(HostDefect::Storage { slot: *slot })?;
+                    check_text_format(at, *format, *boolean)?;
+                    referenced.insert(slot.0);
+                }
+            }
+        }
+        let reads: Vec<_> = referenced.into_iter().map(Slot).collect();
+        if reads.len() != inputs.len() {
+            return Err(HostDefect::Inputs);
+        }
+        if !reads.is_empty() {
+            let [HostStage::Measure { text, .. }, HostStage::Fill { text: filled, .. }] =
+                self.stages.as_slice()
+            else {
+                return Err(HostDefect::StageCount);
+            };
+            if text != filled {
+                return Err(HostDefect::Stage { index: 1 });
+            }
+            let mut seen = BTreeSet::new();
+            let mut needed = BTreeSet::new();
+            let mut pending = vec![*text];
+            while let Some(reference) = pending.pop() {
+                if !seen.insert(reference.0) {
+                    continue;
+                }
+                match self.text.get(reference.0 as usize) {
+                    Some(TextOp::Concat(parts)) => pending.extend(parts),
+                    Some(TextOp::FormatInput { slot, .. }) => {
+                        needed.insert(slot.0);
+                    }
+                    Some(_) => {}
+                    None => return Err(HostDefect::Stage { index: 0 }),
+                }
+            }
+            if needed.len() != reads.len() {
+                return Err(HostDefect::Inputs);
             }
         }
         for (index, storage) in unit.storage.iter().enumerate() {
             let slot = Slot(index as u32);
+            if inputs.contains_key(&slot.0) {
+                continue;
+            }
             let Storage::Output(need) = storage else {
                 return Err(HostDefect::Storage { slot });
             };
@@ -1708,10 +1825,11 @@ impl HostCode {
             let defect = HostDefect::Stage {
                 index: index as u32,
             };
-            if !stage.reads.is_empty() || stage.extent.is_some() {
+            if stage.reads != reads || stage.extent.is_some() || stage.window.is_some() {
                 return Err(defect);
             }
             let (text, valid) = match operation {
+                HostStage::CompareUtf8 { .. } | HostStage::LookupInt { .. } => return Err(defect),
                 HostStage::Measure { text, output } => {
                     let valid = unit.shape_fields.get(output.0 as usize)
                         == Some(&ShapeField::EncodedLength)
@@ -1758,12 +1876,116 @@ impl HostCode {
             }
         }
         for (index, _) in unit.storage.iter().enumerate() {
-            if !filled.contains(&(index as u32)) {
+            if !inputs.contains_key(&(index as u32)) && !filled.contains(&(index as u32)) {
                 return Err(HostDefect::Storage {
                     slot: Slot(index as u32),
                 });
             }
         }
         Ok(())
+    }
+
+    fn check_utf8_scalar(
+        &self,
+        unit: &Unit,
+        reads: &[Slot],
+        uses: &[ShapeRef],
+        output: Slot,
+        fiber: Fiber,
+    ) -> Result<(), HostDefect> {
+        let [stage] = unit.stages.as_slice() else {
+            return Err(HostDefect::StageCount);
+        };
+        let defect = HostDefect::Stage { index: 0 };
+        if !self.text.is_empty()
+            || !unit.selected.is_empty()
+            || stage.reads != reads
+            || stage.uses != uses
+            || stage.writes != [output]
+            || !stage.determines.is_empty()
+            || stage.extent.is_some()
+            || stage.window.is_some()
+        {
+            return Err(defect);
+        }
+        if unit.inputs.len() != reads.len() || unit.storage.len() != reads.len() + 1 {
+            return Err(HostDefect::Inputs);
+        }
+        for (&slot, &length) in reads.iter().zip(uses) {
+            let shape = [ShapeEntry::Runtime(length)];
+            let input = unit.inputs.iter().any(|port| {
+                matches!(port.node, Node::Derived(_))
+                    && port.planes == [slot]
+                    && port.shape == shape
+                    && port.assumes.is_empty()
+                    && matches!(unit.kinds.get(port.kind), Some(Kind::String))
+                    && matches!(unit.layouts.get(port.layout), Some(Layout::Utf8))
+            });
+            let Some(Storage::Input(need)) = unit.storage.get(slot.0 as usize) else {
+                return Err(HostDefect::Storage { slot });
+            };
+            if !input
+                || need.memory != Memory::Host
+                || need.element_bytes != 1
+                || need.align != 1
+                || need.capacity.0 != shape
+            {
+                return Err(HostDefect::Storage { slot });
+            }
+        }
+        let [port] = unit.outputs.as_slice() else {
+            return Err(HostDefect::Output { index: 0 });
+        };
+        let result_kind = matches!(unit.kinds.get(port.kind),
+            Some(Kind::Fiber(found)) if unit.kinds.get_fiber(*found) == Some(&fiber));
+        if !matches!(port.demand, Demand::Value(Node::Derived(_)))
+            || !result_kind
+            || !matches!(
+                unit.layouts.get(port.layout),
+                Some(Layout::Scalar(Scalar::I32))
+            )
+            || port.planes != [output]
+            || !port.shape.is_empty()
+        {
+            return Err(HostDefect::Output { index: 0 });
+        }
+        let Some(Storage::Output(need)) = unit.storage.get(output.0 as usize) else {
+            return Err(HostDefect::Storage { slot: output });
+        };
+        if !matches!(need.memory, Memory::Linear | Memory::Device(0))
+            || need.element_bytes != 4
+            || need.align != 4
+            || !need.capacity.0.is_empty()
+        {
+            return Err(HostDefect::Storage { slot: output });
+        }
+        Ok(())
+    }
+}
+
+fn check_text_format(at: TextRef, format: TextFormat, boolean: bool) -> Result<(), HostDefect> {
+    if format.digits.is_some_and(|digits| digits > 17) || boolean && format != TextFormat::default()
+    {
+        return Err(HostDefect::Format { at });
+    }
+    Ok(())
+}
+
+impl Unit {
+    /// The physical scalar and whether it is a Bool read by native formatting.
+    pub fn text_scalar(&self, port: &InputPort) -> Option<(Scalar, bool)> {
+        let Kind::Fiber(fiber) = self.kinds.get(port.kind)? else {
+            return None;
+        };
+        let Layout::Scalar(scalar) = self.layouts.get(port.layout)? else {
+            return None;
+        };
+        match (self.kinds.get_fiber(*fiber)?, scalar) {
+            (Fiber::Bool, Scalar::I32) => Some((*scalar, true)),
+            (Fiber::Int, Scalar::I32) | (Fiber::Real, Scalar::F32 | Scalar::F64) => {
+                Some((*scalar, false))
+            }
+            _ => None,
+        }
     }
 }
