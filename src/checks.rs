@@ -913,7 +913,10 @@ impl Checked {
         for (index, selection) in unit.selected.iter().enumerate() {
             // An Optional's presence is the first of its shape values.
             let first = &unit.inputs[selection.first as usize];
-            if selection.otherwise.is_some() && first.shape.first() == Some(&named) {
+            if selection.condition.is_none()
+                && selection.otherwise.is_some()
+                && first.shape.first() == Some(&named)
+            {
                 consumers.push(Consumer::Selection(index as u32));
             }
         }
@@ -1473,6 +1476,28 @@ impl Unit {
                     .ok_or(Defect::UnknownInput(at))
             };
             let first = input(selection.first)?;
+            if let Some(condition) = selection.condition {
+                let false_arm = selection.otherwise.ok_or(Defect::KindMismatch(at))?;
+                let used = [condition, selection.first, false_arm]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                let condition = input(condition)?;
+                let arm = input(false_arm)?;
+                if self.inputs.len() != used.len()
+                    || self.selected.len() != 1
+                    || !self.stages.is_empty()
+                    || !self.outputs.is_empty()
+                    || !matches!(self.kinds.get(condition.kind),
+                        Some(Kind::Fiber(fiber)) if self.kinds.get_fiber(*fiber) == Some(&Fiber::Bool))
+                    || self.layouts.get(condition.layout) != Some(&Layout::Scalar(Scalar::I32))
+                    || first.kind != selection.kind
+                    || arm.kind != selection.kind
+                    || first.layout != arm.layout
+                {
+                    return Err(Defect::KindMismatch(at));
+                }
+                continue;
+            }
             let fits = match selection.otherwise {
                 None => first.kind == selection.kind,
                 Some(otherwise) => {

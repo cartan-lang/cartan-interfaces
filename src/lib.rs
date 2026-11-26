@@ -833,17 +833,23 @@ pub struct OutputPort {
 /// selection chooses it. The runtime need not hold that input while every
 /// relevant Optional is present, and then leaves its port unbound.
 ///
-/// Gap: device-side selection and conditional demand for its fallback are
-/// unspecified.
+/// A Bool condition instead selects the entire input in `first` when true or
+/// `otherwise` when false. Both alternatives have the result's kind and
+/// layout, and either input may be left unbound when used only as an
+/// unchosen arm. This form is a standalone selection unit with no stages or
+/// unrelated inputs.
+/// The condition is one bound Bool in an I32 scalar plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     /// The demand this result meets.
     pub demand: Demand,
     /// A reference into the unit's table of kinds.
     pub kind: KindRef,
-    /// The input selected unconditionally or when present.
+    /// A Bool selector input, if this is a choice between whole inputs.
+    pub condition: Option<u32>,
+    /// The input selected unconditionally, when present, or on true.
     pub first: u32,
-    /// The fallback input selected when `first` is absent.
+    /// The fallback selected when `first` is absent or the condition is false.
     pub otherwise: Option<u32>,
 }
 

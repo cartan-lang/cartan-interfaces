@@ -1264,6 +1264,7 @@ mod unit {
     #[test]
     fn a_result_may_be_an_optional_input_or_a_fallback_without_a_copy() {
         let choose = |kind, first, otherwise| Selection {
+            condition: None,
             demand: STATE,
             kind,
             first,
@@ -1297,6 +1298,43 @@ mod unit {
         // Selections must reference existing inputs.
         let unit = current(Scalar::F64, |array, _| choose(array, 0, Some(7)));
         assert_eq!(unit.check().defect(), Some(Defect::UnknownInput(selected)));
+    }
+
+    #[test]
+    fn a_scalar_bool_routes_one_of_two_compatible_inputs() {
+        let mut tables = Tables::default();
+        let flag = tables.kinds.fiber(Fiber::Bool);
+        let flag = tables.kinds.define(Kind::Fiber(flag));
+        let int = tables.kinds.fiber(Fiber::Int);
+        let int = tables.kinds.define(Kind::Fiber(int));
+        let i32 = tables.layouts.define(Layout::Scalar(Scalar::I32));
+        let unit = Unit {
+            inputs: vec![
+                tables.port(flag, i32, vec![], &[0]),
+                tables.port(int, i32, vec![], &[1]),
+                tables.port(int, i32, vec![], &[2]),
+            ],
+            storage: vec![Storage::Input(need(4, vec![])); 3],
+            selected: vec![Selection {
+                demand: STATE,
+                kind: int,
+                condition: Some(0),
+                first: 1,
+                otherwise: Some(2),
+            }],
+            ..tables.unit()
+        };
+        assert!(unit.clone().check().is_ok());
+        let mismatch = Some(Defect::KindMismatch(PortRef::Selected(0)));
+        let mut non_bool = unit.clone();
+        non_bool.inputs[0].kind = int;
+        assert_eq!(non_bool.check().defect(), mismatch);
+        let mut missing_else = unit.clone();
+        missing_else.selected[0].otherwise = None;
+        assert_eq!(missing_else.check().defect(), mismatch);
+        let mut mismatched_arms = unit;
+        mismatched_arms.inputs[2].kind = flag;
+        assert_eq!(mismatched_arms.check().defect(), mismatch);
     }
 
     #[test]
