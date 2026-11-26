@@ -1245,6 +1245,15 @@ pub enum HostStage {
         output: Slot,
         unequal: bool,
     },
+    /// Look up an exact String key in strictly byte-ordered, unique entries.
+    /// The unit reads one UTF-8 input and writes an I32 Int in numerical
+    /// memory. Missing keys write zero. This stage is supplied alone.
+    LookupInt {
+        key: Slot,
+        length: ShapeRef,
+        output: Slot,
+        entries: Vec<(String, i32)>,
+    },
 }
 
 /// A native artifact implementing a text computation. Several logical

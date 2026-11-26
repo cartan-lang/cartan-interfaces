@@ -1675,7 +1675,27 @@ impl HostCode {
             ..
         }] = self.stages.as_slice()
         {
-            return self.check_comparison(unit, *inputs, *lengths, *output);
+            let (reads, uses) = if inputs[0] == inputs[1] {
+                if lengths[0] != lengths[1] {
+                    return Err(HostDefect::Stage { index: 0 });
+                }
+                (&inputs[..1], &lengths[..1])
+            } else {
+                (&inputs[..], &lengths[..])
+            };
+            return self.check_utf8_scalar(unit, reads, uses, *output, Fiber::Bool);
+        }
+        if let [HostStage::LookupInt {
+            key,
+            length,
+            output,
+            entries,
+        }] = self.stages.as_slice()
+        {
+            if !entries.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+                return Err(HostDefect::Stage { index: 0 });
+            }
+            return self.check_utf8_scalar(unit, &[*key], &[*length], *output, Fiber::Int);
         }
         if !unit.selected.is_empty() {
             return Err(HostDefect::Inputs);
@@ -1809,7 +1829,7 @@ impl HostCode {
                 return Err(defect);
             }
             let (text, valid) = match operation {
-                HostStage::CompareUtf8 { .. } => return Err(defect),
+                HostStage::CompareUtf8 { .. } | HostStage::LookupInt { .. } => return Err(defect),
                 HostStage::Measure { text, output } => {
                     let valid = unit.shape_fields.get(output.0 as usize)
                         == Some(&ShapeField::EncodedLength)
@@ -1865,26 +1885,18 @@ impl HostCode {
         Ok(())
     }
 
-    fn check_comparison(
+    fn check_utf8_scalar(
         &self,
         unit: &Unit,
-        inputs: [Slot; 2],
-        lengths: [ShapeRef; 2],
+        reads: &[Slot],
+        uses: &[ShapeRef],
         output: Slot,
+        fiber: Fiber,
     ) -> Result<(), HostDefect> {
         let [stage] = unit.stages.as_slice() else {
             return Err(HostDefect::StageCount);
         };
         let defect = HostDefect::Stage { index: 0 };
-        // An aliased read appears only once in the stage frame.
-        let (reads, uses) = if inputs[0] == inputs[1] {
-            if lengths[0] != lengths[1] {
-                return Err(defect);
-            }
-            (&inputs[..1], &lengths[..1])
-        } else {
-            (&inputs[..], &lengths[..])
-        };
         if !self.text.is_empty()
             || !unit.selected.is_empty()
             || stage.reads != reads
@@ -1924,10 +1936,10 @@ impl HostCode {
         let [port] = unit.outputs.as_slice() else {
             return Err(HostDefect::Output { index: 0 });
         };
-        let bool_kind = matches!(unit.kinds.get(port.kind),
-            Some(Kind::Fiber(fiber)) if unit.kinds.get_fiber(*fiber) == Some(&Fiber::Bool));
+        let result_kind = matches!(unit.kinds.get(port.kind),
+            Some(Kind::Fiber(found)) if unit.kinds.get_fiber(*found) == Some(&fiber));
         if !matches!(port.demand, Demand::Value(Node::Derived(_)))
-            || !bool_kind
+            || !result_kind
             || !matches!(
                 unit.layouts.get(port.layout),
                 Some(Layout::Scalar(Scalar::I32))

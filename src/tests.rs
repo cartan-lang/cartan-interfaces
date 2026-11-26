@@ -2096,6 +2096,79 @@ mod host {
     }
 
     #[test]
+    fn lookup_requires_a_unique_ordered_table_and_an_int_output() {
+        let mut unit = Unit::default();
+        let string = unit.kinds.define(Kind::String);
+        let int = unit.kinds.fiber(Fiber::Int);
+        let int = unit.kinds.define(Kind::Fiber(int));
+        let utf8 = unit.layouts.define(Layout::Utf8);
+        let i32 = unit.layouts.define(Layout::Scalar(Scalar::I32));
+        let key = Slot(0);
+        let length = ShapeRef(0);
+        let output = Slot(1);
+        let shape = vec![ShapeEntry::Runtime(length)];
+        unit.shape_fields.push(ShapeField::EncodedLength);
+        unit.inputs.push(InputPort {
+            node: Node::Derived(DerivedId(0)),
+            kind: string,
+            layout: utf8,
+            shape: shape.clone(),
+            planes: vec![key],
+            assumes: vec![],
+        });
+        unit.storage.push(Storage::Input(Need {
+            memory: Memory::Host,
+            element_bytes: 1,
+            align: 1,
+            capacity: Capacity(shape),
+        }));
+        unit.outputs.push(OutputPort {
+            demand: Demand::Value(Node::Derived(DerivedId(1))),
+            kind: int,
+            layout: i32,
+            shape: vec![],
+            planes: vec![output],
+        });
+        unit.storage.push(Storage::Output(Need {
+            memory: Memory::Linear,
+            element_bytes: 4,
+            align: 4,
+            capacity: Capacity::default(),
+        }));
+        unit.stages.push(Stage {
+            entry: "lookup".into(),
+            reads: vec![key],
+            uses: vec![length],
+            writes: vec![output],
+            ..Stage::default()
+        });
+        let code = |entries| HostCode {
+            text: vec![],
+            stages: vec![HostStage::LookupInt {
+                key,
+                length,
+                output,
+                entries,
+            }],
+        };
+        let checked = unit.clone().check().unwrap();
+        let good = code(vec![("a".into(), 1), ("é".into(), 2)]);
+        assert_eq!(good.check(&checked), Ok(()));
+        for malformed in [["a", "a"], ["é", "a"]] {
+            assert_eq!(
+                code(malformed.map(|key| (key.into(), 1)).to_vec()).check(&checked),
+                Err(HostDefect::Stage { index: 0 })
+            );
+        }
+        let boolean = unit.kinds.fiber(Fiber::Bool);
+        unit.outputs[0].kind = unit.kinds.define(Kind::Fiber(boolean));
+        assert_eq!(
+            good.check(&unit.check().unwrap()),
+            Err(HostDefect::Output { index: 0 })
+        );
+    }
+
+    #[test]
     fn input_format_checks_the_scalar_port_and_both_stage_reads() {
         let (mut unit, mut code) = template();
         let fiber = unit.kinds.fiber(Fiber::Real);
