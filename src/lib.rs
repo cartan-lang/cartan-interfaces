@@ -700,7 +700,7 @@ pub enum Memory {
 }
 
 /// An index into a unit's storage table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Slot(pub u32);
 
 /// A slot's required element capacity: the product of the counts represented
@@ -1158,6 +1158,8 @@ pub enum TextScalar {
     Int(i32),
     /// IEEE 754 binary32 bits, including signed zero and nonfinite values.
     Real32(u32),
+    /// IEEE 754 binary64 bits.
+    Real64(u64),
 }
 
 /// The decimal notation requested by a text operation.
@@ -1206,6 +1208,12 @@ pub enum TextOp {
         value: TextScalar,
         format: TextFormat,
     },
+    /// Format the scalar in a checked input slot. Measure and Fill reuse
+    /// the same captured bits, with one read per input for the execution.
+    FormatInput {
+        slot: Slot,
+        format: TextFormat,
+    },
 }
 
 /// A native text stage, aligned by index with a unit's stage list. Every stage
@@ -1244,7 +1252,7 @@ pub enum HostStage {
 /// no fill or result publication follows it.
 /// Counting and writing use the same formatting semantics, with checked sizes
 /// and bounded output. Temporary text cannot bypass Runtime storage accounting.
-/// Comparison can read bound String inputs. Formatting bound scalars is unspecified.
+/// Comparison reads bound String inputs. Formatting can read bound scalar inputs.
 #[derive(Clone, Debug, Default)]
 pub struct HostCode {
     pub text: Vec<TextOp>,

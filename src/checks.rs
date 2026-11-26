@@ -2,7 +2,7 @@
 //! validation.
 
 use super::*;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // Kinds: logical value structure
 
@@ -1652,9 +1652,33 @@ impl HostCode {
         {
             return self.check_comparison(unit, *inputs, *lengths, *output);
         }
-        if !unit.inputs.is_empty() || !unit.selected.is_empty() {
+        if !unit.selected.is_empty() {
             return Err(HostDefect::Inputs);
         }
+        let mut inputs = BTreeMap::new();
+        for port in &unit.inputs {
+            let [slot] = port.planes.as_slice() else {
+                return Err(HostDefect::Inputs);
+            };
+            let Some((scalar, boolean)) = unit.text_scalar(port) else {
+                return Err(HostDefect::Inputs);
+            };
+            let bytes = if scalar == Scalar::F64 { 8 } else { 4 };
+            let Some(Storage::Input(need)) = unit.storage.get(slot.0 as usize) else {
+                return Err(HostDefect::Storage { slot: *slot });
+            };
+            if !matches!(need.memory, Memory::Linear | Memory::Device(0))
+                || need.element_bytes != bytes
+                || need.align != bytes
+                || !need.capacity.0.is_empty()
+                || !port.shape.is_empty()
+                || !port.assumes.is_empty()
+                || inputs.insert(slot.0, boolean).is_some()
+            {
+                return Err(HostDefect::Storage { slot: *slot });
+            }
+        }
+        let mut referenced = BTreeSet::new();
         for (index, operation) in self.text.iter().enumerate() {
             let at = TextRef(index as u32);
             match operation {
@@ -1667,16 +1691,55 @@ impl HostCode {
                     }
                 }
                 TextOp::Format { value, format } => {
-                    if format.digits.is_some_and(|digits| digits > 17)
-                        || matches!(value, TextScalar::Bool(_)) && *format != TextFormat::default()
-                    {
-                        return Err(HostDefect::Format { at });
-                    }
+                    check_text_format(at, *format, matches!(value, TextScalar::Bool(_)))?;
                 }
+                TextOp::FormatInput { slot, format } => {
+                    let boolean = inputs
+                        .get(&slot.0)
+                        .ok_or(HostDefect::Storage { slot: *slot })?;
+                    check_text_format(at, *format, *boolean)?;
+                    referenced.insert(slot.0);
+                }
+            }
+        }
+        let reads: Vec<_> = referenced.into_iter().map(Slot).collect();
+        if reads.len() != inputs.len() {
+            return Err(HostDefect::Inputs);
+        }
+        if !reads.is_empty() {
+            let [HostStage::Measure { text, .. }, HostStage::Fill { text: filled, .. }] =
+                self.stages.as_slice()
+            else {
+                return Err(HostDefect::StageCount);
+            };
+            if text != filled {
+                return Err(HostDefect::Stage { index: 1 });
+            }
+            let mut seen = BTreeSet::new();
+            let mut needed = BTreeSet::new();
+            let mut pending = vec![*text];
+            while let Some(reference) = pending.pop() {
+                if !seen.insert(reference.0) {
+                    continue;
+                }
+                match self.text.get(reference.0 as usize) {
+                    Some(TextOp::Concat(parts)) => pending.extend(parts),
+                    Some(TextOp::FormatInput { slot, .. }) => {
+                        needed.insert(slot.0);
+                    }
+                    Some(_) => {}
+                    None => return Err(HostDefect::Stage { index: 0 }),
+                }
+            }
+            if needed.len() != reads.len() {
+                return Err(HostDefect::Inputs);
             }
         }
         for (index, storage) in unit.storage.iter().enumerate() {
             let slot = Slot(index as u32);
+            if inputs.contains_key(&slot.0) {
+                continue;
+            }
             let Storage::Output(need) = storage else {
                 return Err(HostDefect::Storage { slot });
             };
@@ -1717,7 +1780,7 @@ impl HostCode {
             let defect = HostDefect::Stage {
                 index: index as u32,
             };
-            if !stage.reads.is_empty() || stage.extent.is_some() {
+            if stage.reads != reads || stage.extent.is_some() || stage.window.is_some() {
                 return Err(defect);
             }
             let (text, valid) = match operation {
@@ -1768,7 +1831,7 @@ impl HostCode {
             }
         }
         for (index, _) in unit.storage.iter().enumerate() {
-            if !filled.contains(&(index as u32)) {
+            if !inputs.contains_key(&(index as u32)) && !filled.contains(&(index as u32)) {
                 return Err(HostDefect::Storage {
                     slot: Slot(index as u32),
                 });
@@ -1860,5 +1923,32 @@ impl HostCode {
             return Err(HostDefect::Storage { slot: output });
         }
         Ok(())
+    }
+}
+
+fn check_text_format(at: TextRef, format: TextFormat, boolean: bool) -> Result<(), HostDefect> {
+    if format.digits.is_some_and(|digits| digits > 17) || boolean && format != TextFormat::default()
+    {
+        return Err(HostDefect::Format { at });
+    }
+    Ok(())
+}
+
+impl Unit {
+    /// The physical scalar and whether it is a Bool read by native formatting.
+    pub fn text_scalar(&self, port: &InputPort) -> Option<(Scalar, bool)> {
+        let Kind::Fiber(fiber) = self.kinds.get(port.kind)? else {
+            return None;
+        };
+        let Layout::Scalar(scalar) = self.layouts.get(port.layout)? else {
+            return None;
+        };
+        match (self.kinds.get_fiber(*fiber)?, scalar) {
+            (Fiber::Bool, Scalar::I32) => Some((*scalar, true)),
+            (Fiber::Int, Scalar::I32) | (Fiber::Real, Scalar::F32 | Scalar::F64) => {
+                Some((*scalar, false))
+            }
+            _ => None,
+        }
     }
 }

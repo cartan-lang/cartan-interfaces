@@ -2058,6 +2058,51 @@ mod host {
     }
 
     #[test]
+    fn input_format_checks_the_scalar_port_and_both_stage_reads() {
+        let (mut unit, mut code) = template();
+        let fiber = unit.kinds.fiber(Fiber::Real);
+        let kind = unit.kinds.define(Kind::Fiber(fiber));
+        let layout = unit.layouts.define(Layout::Scalar(Scalar::F64));
+        let slot = Slot(1);
+        unit.inputs.push(InputPort {
+            node: Node::Derived(DerivedId(1)),
+            kind,
+            layout,
+            shape: vec![],
+            planes: vec![slot],
+            assumes: vec![],
+        });
+        unit.storage.push(Storage::Input(Need {
+            memory: Memory::Linear,
+            element_bytes: 8,
+            align: 8,
+            capacity: Capacity::default(),
+        }));
+        for stage in &mut unit.stages {
+            stage.reads = vec![slot];
+        }
+        code.text[1] = TextOp::FormatInput {
+            slot,
+            format: TextFormat::default(),
+        };
+        assert_eq!(code.check(&unit.clone().check().unwrap()), Ok(()));
+        unit.stages[1].reads.clear();
+        assert_eq!(
+            code.check(&unit.clone().check().unwrap()),
+            Err(HostDefect::Stage { index: 1 })
+        );
+        unit.stages[1].reads.push(slot);
+        let Storage::Input(need) = &mut unit.storage[1] else {
+            unreachable!()
+        };
+        need.memory = Memory::Host;
+        assert_eq!(
+            code.check(&unit.check().unwrap()),
+            Err(HostDefect::Storage { slot })
+        );
+    }
+
+    #[test]
     fn native_text_agrees_with_storage_and_shape_before_execution() {
         let (unit, code) = template();
         assert_eq!(unit.kinds.notation(KindRef(0)), "String");
