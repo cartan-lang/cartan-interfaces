@@ -1643,6 +1643,15 @@ impl HostCode {
     /// This checks descriptions, not the results of executing a formatter.
     pub fn check(&self, checked: &Checked) -> Result<(), HostDefect> {
         let unit = checked.unit();
+        if let [HostStage::CompareUtf8 {
+            inputs,
+            lengths,
+            output,
+            ..
+        }] = self.stages.as_slice()
+        {
+            return self.check_comparison(unit, *inputs, *lengths, *output);
+        }
         if !unit.inputs.is_empty() || !unit.selected.is_empty() {
             return Err(HostDefect::Inputs);
         }
@@ -1712,6 +1721,7 @@ impl HostCode {
                 return Err(defect);
             }
             let (text, valid) = match operation {
+                HostStage::CompareUtf8 { .. } => return Err(defect),
                 HostStage::Measure { text, output } => {
                     let valid = unit.shape_fields.get(output.0 as usize)
                         == Some(&ShapeField::EncodedLength)
@@ -1763,6 +1773,91 @@ impl HostCode {
                     slot: Slot(index as u32),
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn check_comparison(
+        &self,
+        unit: &Unit,
+        inputs: [Slot; 2],
+        lengths: [ShapeRef; 2],
+        output: Slot,
+    ) -> Result<(), HostDefect> {
+        let [stage] = unit.stages.as_slice() else {
+            return Err(HostDefect::StageCount);
+        };
+        let defect = HostDefect::Stage { index: 0 };
+        // An aliased read appears only once in the stage frame.
+        let (reads, uses) = if inputs[0] == inputs[1] {
+            if lengths[0] != lengths[1] {
+                return Err(defect);
+            }
+            (&inputs[..1], &lengths[..1])
+        } else {
+            (&inputs[..], &lengths[..])
+        };
+        if !self.text.is_empty()
+            || !unit.selected.is_empty()
+            || stage.reads != reads
+            || stage.uses != uses
+            || stage.writes != [output]
+            || !stage.determines.is_empty()
+            || stage.extent.is_some()
+            || stage.window.is_some()
+        {
+            return Err(defect);
+        }
+        if unit.inputs.len() != reads.len() || unit.storage.len() != reads.len() + 1 {
+            return Err(HostDefect::Inputs);
+        }
+        for (&slot, &length) in reads.iter().zip(uses) {
+            let shape = [ShapeEntry::Runtime(length)];
+            let input = unit.inputs.iter().any(|port| {
+                matches!(port.node, Node::Derived(_))
+                    && port.planes == [slot]
+                    && port.shape == shape
+                    && port.assumes.is_empty()
+                    && matches!(unit.kinds.get(port.kind), Some(Kind::String))
+                    && matches!(unit.layouts.get(port.layout), Some(Layout::Utf8))
+            });
+            let Some(Storage::Input(need)) = unit.storage.get(slot.0 as usize) else {
+                return Err(HostDefect::Storage { slot });
+            };
+            if !input
+                || need.memory != Memory::Host
+                || need.element_bytes != 1
+                || need.align != 1
+                || need.capacity.0 != shape
+            {
+                return Err(HostDefect::Storage { slot });
+            }
+        }
+        let [port] = unit.outputs.as_slice() else {
+            return Err(HostDefect::Output { index: 0 });
+        };
+        let bool_kind = matches!(unit.kinds.get(port.kind),
+            Some(Kind::Fiber(fiber)) if unit.kinds.get_fiber(*fiber) == Some(&Fiber::Bool));
+        if !matches!(port.demand, Demand::Value(Node::Derived(_)))
+            || !bool_kind
+            || !matches!(
+                unit.layouts.get(port.layout),
+                Some(Layout::Scalar(Scalar::I32))
+            )
+            || port.planes != [output]
+            || !port.shape.is_empty()
+        {
+            return Err(HostDefect::Output { index: 0 });
+        }
+        let Some(Storage::Output(need)) = unit.storage.get(output.0 as usize) else {
+            return Err(HostDefect::Storage { slot: output });
+        };
+        if !matches!(need.memory, Memory::Linear | Memory::Device(0))
+            || need.element_bytes != 4
+            || need.align != 4
+            || !need.capacity.0.is_empty()
+        {
+            return Err(HostDefect::Storage { slot: output });
         }
         Ok(())
     }

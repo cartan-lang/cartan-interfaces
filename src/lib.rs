@@ -1209,7 +1209,7 @@ pub enum TextOp {
 }
 
 /// A native text stage, aligned by index with a unit's stage list. Every stage
-/// runs once with no dispatch extent, storage reads or implicit inputs.
+/// runs once with no dispatch extent or implicit inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostStage {
     /// Measure UTF-8 code units and produce one encoded-length shape value.
@@ -1222,9 +1222,18 @@ pub enum HostStage {
         output: Slot,
         length: ShapeEntry,
     },
+    /// Compare two bound UTF-8 String planes by their exact bytes. Write one
+    /// Bool encoded as little-endian I32 in the session's numerical memory.
+    /// The operands may name the same input. This stage is supplied alone.
+    CompareUtf8 {
+        inputs: [Slot; 2],
+        lengths: [ShapeRef; 2],
+        output: Slot,
+        unequal: bool,
+    },
 }
 
-/// A native artifact implementing a closed text computation. Several logical
+/// A native artifact implementing a text computation. Several logical
 /// operations and stages may belong to one unit, sharing this one text table.
 /// The runtime uses its ordinary unit cache, value ownership and publication.
 /// Outputs satisfy distinct Derived value demands; one computation identity
@@ -1235,7 +1244,7 @@ pub enum HostStage {
 /// no fill or result publication follows it.
 /// Counting and writing use the same formatting semantics, with checked sizes
 /// and bounded output. Temporary text cannot bypass Runtime storage accounting.
-/// Gap: text operands from input ports and other host services are unspecified.
+/// Comparison can read bound String inputs. Formatting bound scalars is unspecified.
 #[derive(Clone, Debug, Default)]
 pub struct HostCode {
     pub text: Vec<TextOp>,

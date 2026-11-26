@@ -1978,6 +1978,86 @@ mod host {
     }
 
     #[test]
+    fn comparison_checks_utf8_inputs_and_the_numerical_bool_output() {
+        let mut unit = Unit::default();
+        let string = unit.kinds.define(Kind::String);
+        let boolean = unit.kinds.fiber(Fiber::Bool);
+        let boolean = unit.kinds.define(Kind::Fiber(boolean));
+        let utf8 = unit.layouts.define(Layout::Utf8);
+        let i32 = unit.layouts.define(Layout::Scalar(Scalar::I32));
+        let lengths = [ShapeRef(0), ShapeRef(1)];
+        let inputs = [Slot(0), Slot(1)];
+        for (slot, length) in inputs.into_iter().zip(lengths) {
+            let shape = vec![ShapeEntry::Runtime(length)];
+            unit.shape_fields.push(ShapeField::EncodedLength);
+            unit.inputs.push(InputPort {
+                node: Node::Derived(DerivedId(slot.0)),
+                kind: string,
+                layout: utf8,
+                shape: shape.clone(),
+                planes: vec![slot],
+                assumes: vec![],
+            });
+            unit.storage.push(Storage::Input(Need {
+                memory: Memory::Host,
+                element_bytes: 1,
+                align: 1,
+                capacity: Capacity(shape),
+            }));
+        }
+        let output = Slot(2);
+        unit.outputs.push(OutputPort {
+            demand: Demand::Value(Node::Derived(DerivedId(2))),
+            kind: boolean,
+            layout: i32,
+            shape: vec![],
+            planes: vec![output],
+        });
+        unit.storage.push(Storage::Output(Need {
+            memory: Memory::Linear,
+            element_bytes: 4,
+            align: 4,
+            capacity: Capacity::default(),
+        }));
+        unit.stages.push(Stage {
+            entry: "compare".into(),
+            reads: inputs.to_vec(),
+            uses: lengths.to_vec(),
+            writes: vec![output],
+            ..Default::default()
+        });
+        let code = HostCode {
+            text: vec![],
+            stages: vec![HostStage::CompareUtf8 {
+                inputs,
+                lengths,
+                output,
+                unequal: false,
+            }],
+        };
+        let checked = unit.clone().check().unwrap();
+        assert_eq!(code.check(&checked), Ok(()));
+        let mut wrong_length = code.clone();
+        let HostStage::CompareUtf8 { lengths, .. } = &mut wrong_length.stages[0] else {
+            unreachable!()
+        };
+        lengths.swap(0, 1);
+        assert_eq!(
+            wrong_length.check(&checked),
+            Err(HostDefect::Stage { index: 0 })
+        );
+
+        let Storage::Output(need) = &mut unit.storage[output.0 as usize] else {
+            unreachable!()
+        };
+        need.memory = Memory::Host;
+        assert_eq!(
+            code.check(&unit.check().unwrap()),
+            Err(HostDefect::Storage { slot: output })
+        );
+    }
+
+    #[test]
     fn native_text_agrees_with_storage_and_shape_before_execution() {
         let (unit, code) = template();
         assert_eq!(unit.kinds.notation(KindRef(0)), "String");
